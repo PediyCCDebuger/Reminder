@@ -1,0 +1,86 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  repository_dispatch:
+    types: [build-release]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read version
+        run: |
+          version=$(sed -nE 's/^\s*versionName = "(.*)"/\1/p' app/build.gradle.kts)
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "TAG=v$version" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Restore or create signing key
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.REMINDER_KEYSTORE_BASE64 }}
+          SECRET_PASSWORD: ${{ secrets.REMINDER_STORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+            echo "password=$SECRET_PASSWORD" >> "$GITHUB_OUTPUT"
+          else
+            keytool -genkeypair -v \
+              -keystore "$RUNNER_TEMP/release.jks" \
+              -alias reminder -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass addintimer -keypass addintimer \
+              -dname "CN=AddinTimer Revive, OU=Personal, O=Personal, L=CN, ST=CN, C=CN"
+            echo "password=addintimer" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build signed release APKs
+        env:
+          REMINDER_STORE_FILE: ${{ runner.temp }}/release.jks
+          REMINDER_STORE_PASSWORD: ${{ steps.signing.outputs.password }}
+          REMINDER_KEY_ALIAS: reminder
+          REMINDER_KEY_PASSWORD: ${{ steps.signing.outputs.password }}
+        run: ./gradlew assembleRelease
+
+      - name: Verify signatures
+        run: |
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner"
+          for apk in app/build/outputs/apk/release/*.apk; do
+            echo "$apk"
+            "$apksigner" verify --print-certs "$apk" | grep "SHA-256" | head -1
+          done
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          out=app/build/outputs/apk/release
+          dist="$RUNNER_TEMP/dist"
+          mkdir -p "$dist"
+          cp "$out/app-arm64-v8a-release.apk"   "$dist/AddinTimerRevive-$VERSION-arm64-v8a.apk"
+          cp "$out/app-armeabi-v7a-release.apk" "$dist/AddinTimerRevive-$VERSION-armeabi-v7a.apk"
+          cp "$out/app-universal-release.apk"   "$dist/AddinTimerRevive-$VERSION-universal.apk"
+          (cd "$dist" && sha256sum *.apk > SHA256SUMS)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$dist"/* --clobber
+          else
+            gh release create "$TAG" "$dist"/* --title "AddinTimer 复刻版 $VERSION" --generate-notes
+          fi
+
+      - name: Remove signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
