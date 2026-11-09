@@ -28,8 +28,8 @@ android {
     applicationId = "app.lentikr.reminder"
     minSdk = 29
     targetSdk = 37
-    versionCode = 21
-    versionName = "2.0.1"
+    versionCode = 22
+    versionName = "2.1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -59,12 +59,12 @@ android {
     }
   }
 
-  // One APK for arm64 phones plus a universal one for everything else (emulators, older devices).
+  // Explicit 64-bit and 32-bit builds plus a universal APK (emulators, x86, sideload).
   splits {
     abi {
       isEnable = true
       reset()
-      include("arm64-v8a")
+      include("arm64-v8a", "armeabi-v7a")
       isUniversalApk = true
     }
   }

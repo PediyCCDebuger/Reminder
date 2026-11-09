@@ -16,7 +16,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.lentikr.reminder.data.settings.AppSettings
 import com.lentikr.reminder.data.settings.SettingsRepository
-import com.lentikr.reminder.ui.navigation.AppNavigation
+import com.lentikr.reminder.timer.TimerApp
 import com.lentikr.reminder.ui.theme.ReminderTheme
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -38,7 +38,7 @@ class MainActivity : ComponentActivity() {
     setContent {
       val settings by viewModel.settings.collectAsStateWithLifecycle()
       ReminderTheme(settings ?: AppSettings()) {
-        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) { AppNavigation() }
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) { TimerApp() }
       }
     }
   }
