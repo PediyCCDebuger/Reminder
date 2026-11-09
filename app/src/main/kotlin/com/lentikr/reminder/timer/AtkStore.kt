@@ -80,6 +80,32 @@ class AtkStore(private val context: Context) {
     return 0
   }
 
+  /** Same actlog table the original app used; feeds 查看日志 in the long-press menu. */
+  fun log(timerId: Long, state: Int, info: String) {
+    val v = android.content.ContentValues()
+    v.put("date", System.currentTimeMillis())
+    v.put("timerid", timerId)
+    v.put("state", state)
+    v.put("info", info)
+    db().insert("actlog", null, v)
+  }
+
+  fun logs(timerId: Long): List<String> {
+    val out = ArrayList<String>()
+    val c = db().rawQuery(
+      "SELECT date, state, info FROM actlog WHERE timerid = ? ORDER BY id DESC LIMIT 20",
+      arrayOf(timerId.toString()),
+    )
+    val fmt = java.text.SimpleDateFormat("yyyy/MM/dd HH:mm:ss", java.util.Locale.CHINA)
+    c.use {
+      while (it.moveToNext()) {
+        val whenText = try { fmt.format(java.util.Date(it.getLong(0))) } catch (e: Exception) { "?" }
+        out.add("$whenText  ${it.getString(2) ?: ""} (${it.getInt(1)})")
+      }
+    }
+    return out
+  }
+
   /** Import an AddinTimer .atk (or any SQLite file with a timer/param table). Returns row count. */
   fun importAtk(uri: Uri, replace: Boolean): Int {
     val cache = File(context.cacheDir, "import_${System.currentTimeMillis()}.atk")
