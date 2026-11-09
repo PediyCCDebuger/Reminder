@@ -50,10 +50,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import cn.nnci.addintimer.Occurrence
 import java.text.SimpleDateFormat
-import java.time.Instant
-import java.time.LocalDate
 import java.time.LocalDateTime
-import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Date
 import java.util.Locale
@@ -398,8 +395,10 @@ private fun AtkTimerRow(
   onLongClick: () -> Unit,
   onToggle: (Boolean) -> Unit,
 ) {
+  // java.time.LocalDate.ofInstant is API 34; compare day strings instead so API 29+ works.
   val tomorrow = next > 0 && try {
-    LocalDate.ofInstant(Instant.ofEpochMilli(next), ZoneId.systemDefault()) == LocalDate.now().plusDays(1)
+    val dayFmt = SimpleDateFormat("yyyyMMdd", Locale.CHINA)
+    dayFmt.format(Date(next)) == dayFmt.format(Date(System.currentTimeMillis() + 24L * 60 * 60 * 1000))
   } catch (e: Exception) {
     false
   }

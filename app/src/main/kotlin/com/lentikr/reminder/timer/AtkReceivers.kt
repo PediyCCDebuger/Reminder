@@ -231,7 +231,7 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
       if (!item?.message.isNullOrBlank()) {
         Spacer(Modifier.height(16.dp))
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-          Text(item!!.message, color = Color(0xFFCFCFCF), fontSize = 17.sp)
+          Text(item?.message ?: "", color = Color(0xFFCFCFCF), fontSize = 17.sp)
         }
       }
       Spacer(Modifier.weight(1f))
