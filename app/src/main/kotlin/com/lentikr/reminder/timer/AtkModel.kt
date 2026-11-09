@@ -1,6 +1,8 @@
 package com.lentikr.reminder.timer
 
+import cn.nnci.addintimer.Lunar
 import cn.nnci.addintimer.Rule
+import java.util.Locale
 
 /**
  * Binary-level reconstruction of AddinTimer 2.1G's per-timer settings.
@@ -93,13 +95,13 @@ object AlarmSpec {
   const val SECTION_UI = "界面设置"
   const val SECTION_OTHER = "其他设置"
 
+  /**
+   * Order follows the original 参数设置 screen: 通知设置 → 贪睡设置 → 界面设置,
+   * then 其他设置 with the remaining fields (they stay writable but are scrolled out of sight
+   * on the original screen too). Indices 19/20 are internal counters: not shown, never dropped.
+   */
   val FIELDS: List<ActSpec> = listOf(
-    ActSpec(0, "提醒备注", FieldKind.TEXT, section = SECTION_OTHER),
     ActSpec(1, "播报时间", FieldKind.SELECT, AtkOptions.RING_TIME, SECTION_NOTIFY),
-    ActSpec(2, "播报位置", FieldKind.SELECT, AtkOptions.RING_SORT, SECTION_NOTIFY),
-    ActSpec(3, "声音模式", FieldKind.SELECT, AtkOptions.RING_MODE, SECTION_NOTIFY),
-    ActSpec(4, "延迟时间", FieldKind.SELECT, AtkOptions.RING_DELAY, SECTION_NOTIFY),
-    ActSpec(5, "间隔时间", FieldKind.SELECT, AtkOptions.RING_INTERVAL, SECTION_NOTIFY),
     ActSpec(6, "铃声类型", FieldKind.SELECT, AtkOptions.RING_TYPE, SECTION_NOTIFY),
     ActSpec(7, "选择路径", FieldKind.TEXT, section = SECTION_NOTIFY),
     ActSpec(8, "重复次数", FieldKind.SELECT, AtkOptions.RING_REPEAT, SECTION_NOTIFY),
@@ -107,21 +109,23 @@ object AlarmSpec {
     ActSpec(10, "渐响模式", FieldKind.SELECT, AtkOptions.RING_VOL_STEP, SECTION_NOTIFY),
     ActSpec(11, "强制外放", FieldKind.SELECT, AtkOptions.FORCE_SPEAKER, SECTION_NOTIFY),
     ActSpec(12, "振动类型", FieldKind.SELECT, AtkOptions.VIBRATE, SECTION_NOTIFY),
-    ActSpec(23, "播报内容", FieldKind.MULTI, AtkOptions.BROADCAST_CONTENT, SECTION_NOTIFY),
     ActSpec(13, "预设时间", FieldKind.SELECT, AtkOptions.SNAP_DUR, SECTION_SNOOZE),
     ActSpec(14, "自动贪睡", FieldKind.SELECT, AtkOptions.SNAP_REPEAT, SECTION_SNOOZE),
-    ActSpec(24, "手动贪睡", FieldKind.SELECT, AtkOptions.HAND_SNAP, SECTION_SNOOZE),
     ActSpec(15, "屏幕模式", FieldKind.SELECT, AtkOptions.LOCK_TYPE, SECTION_UI),
-    ActSpec(16, "终止确认", FieldKind.SELECT, AtkOptions.TIP_CLOSE, SECTION_UI),
-    ActSpec(17, "光线感应器", FieldKind.SELECT, AtkOptions.SENSOR_LIGHT, SECTION_UI),
     ActSpec(18, "翻转感应", FieldKind.SELECT, AtkOptions.SENSOR_GRAVITY, SECTION_UI),
-    ActSpec(21, "算术题解锁", FieldKind.SELECT, AtkOptions.ANSWER_PROBLEM, SECTION_UI),
-    ActSpec(22, "暂停方式", FieldKind.SELECT, AtkOptions.STOP_STYLE, SECTION_UI),
-    ActSpec(25, "电源键按下", FieldKind.SELECT, AtkOptions.POWER_STYLE, SECTION_UI),
-    ActSpec(26, "界面样式", FieldKind.SELECT, AtkOptions.UI_STYLE, SECTION_UI),
-    // 19 / 20 are internal counters written by the original app; kept editable but out of the way.
-    ActSpec(19, "内部计数", FieldKind.NUMBER, section = SECTION_OTHER),
-    ActSpec(20, "内部时间戳", FieldKind.NUMBER, section = SECTION_OTHER),
+    ActSpec(0, "提醒备注", FieldKind.TEXT, section = SECTION_OTHER),
+    ActSpec(2, "播报位置", FieldKind.SELECT, AtkOptions.RING_SORT, SECTION_OTHER),
+    ActSpec(3, "声音模式", FieldKind.SELECT, AtkOptions.RING_MODE, SECTION_OTHER),
+    ActSpec(4, "延迟时间", FieldKind.SELECT, AtkOptions.RING_DELAY, SECTION_OTHER),
+    ActSpec(5, "间隔时间", FieldKind.SELECT, AtkOptions.RING_INTERVAL, SECTION_OTHER),
+    ActSpec(23, "播报内容", FieldKind.MULTI, AtkOptions.BROADCAST_CONTENT, SECTION_OTHER),
+    ActSpec(24, "手动贪睡", FieldKind.SELECT, AtkOptions.HAND_SNAP, SECTION_OTHER),
+    ActSpec(16, "终止确认", FieldKind.SELECT, AtkOptions.TIP_CLOSE, SECTION_OTHER),
+    ActSpec(17, "光线感应器", FieldKind.SELECT, AtkOptions.SENSOR_LIGHT, SECTION_OTHER),
+    ActSpec(21, "算术题解锁", FieldKind.SELECT, AtkOptions.ANSWER_PROBLEM, SECTION_OTHER),
+    ActSpec(22, "暂停方式", FieldKind.SELECT, AtkOptions.STOP_STYLE, SECTION_OTHER),
+    ActSpec(25, "电源键按下", FieldKind.SELECT, AtkOptions.POWER_STYLE, SECTION_OTHER),
+    ActSpec(26, "界面样式", FieldKind.SELECT, AtkOptions.UI_STYLE, SECTION_OTHER),
   )
 
   /** Defaults from GSW/AddinTimer/ad.<init>(). */
@@ -227,6 +231,37 @@ class AtkItem {
     return kind
   }
 
+  /** Bottom tabs of the original main screen are stored as 100..103 in base[1]. */
+  fun pageIndex(): Int = (page - 100).coerceIn(0, 3)
+  fun moveToPage(index: Int) { page = 100 + index.coerceIn(0, 3) }
+
+  /** "[按周] 一,二,三,四,五" style second line used by the original list rows. */
+  fun summary(): String {
+    val r = rule
+    return when (r.mode) {
+      Rule.MODE_WEEK -> {
+        val days = parseIndexList(r.weekdays).sorted()
+          .joinToString(",") { AtkOptions.WEEK_SHORT[it.coerceIn(0, 6)] }
+        "[按周] " + days.ifEmpty { "未选择" }
+      }
+      Rule.MODE_ONCE -> "[指定] " + String.format(
+        Locale.CHINA, "%04d-%02d-%02d", r.sy, r.sm, r.sd,
+      )
+      Rule.MODE_DAYS -> "[按天] " + if (r.interval <= 1) "每天" else "每 ${r.interval} 天"
+      Rule.MODE_YEAR_MONTH -> {
+        val months = parseIndexList(r.months).sorted().joinToString(",") { "${it + 1}月" }
+        "[按月] " + months.ifEmpty { "未选择" }
+      }
+      Rule.MODE_LUNAR -> "[阴历] " +
+        (if (r.lunarLeap == 1) "闰" else "") +
+        Lunar.monthName(r.lunarMonth) + Lunar.dayName(r.lunarDay)
+      Rule.MODE_TARGET -> "[倒计] " + String.format(
+        Locale.CHINA, "%04d-%02d-%02d", r.ey, r.em, r.ed,
+      )
+      else -> ""
+    }
+  }
+
   fun param(): String {
     if (kind == "ALARM") ensureAlarmAct()
     base[5] = rule.serialize()
@@ -290,16 +325,42 @@ class AtkItem {
       return it
     }
 
-    fun newAlarm(): AtkItem {
+    /**
+     * New item from the 提醒管理 group.
+     * 0 = 定时提醒 (weekly), 1 = 快速提醒 (one shot), 2 = 整点报时 (hourly).
+     */
+    fun newAlarm(preset: Int = 0): AtkItem {
       val it = AtkItem()
       it.kind = "ALARM"
-      it.name = "新定时器"
       it.hour = 8
       it.minute = 0
       val r = Rule()
-      r.mode = Rule.MODE_WEEK
-      r.weekdays = "1,2,3,4,5"
       it.rule = r
+      when (preset) {
+        1 -> {
+          it.name = "快速提醒"
+          r.mode = Rule.MODE_ONCE
+          val n = java.time.LocalDate.now()
+          r.sy = n.year; r.sm = n.monthValue; r.sd = n.dayOfMonth
+        }
+        2 -> {
+          it.name = "整点报时"
+          r.mode = Rule.MODE_DAYS
+          r.interval = 1
+          val n = java.time.LocalDate.now()
+          r.by = n.year; r.bm = n.monthValue; r.bd = n.dayOfMonth
+          it.minute = 0
+          it.hourLoop = 1
+          it.loopMinutes = 60
+          it.loopEndH = 23
+          it.loopEndM = 59
+        }
+        else -> {
+          it.name = "新定时器"
+          r.mode = Rule.MODE_WEEK
+          r.weekdays = "1,2,3,4,5"
+        }
+      }
       it.act = AlarmSpec.DEFAULTS.toMutableList()
       it.base[5] = it.rule.serialize()
       return it
