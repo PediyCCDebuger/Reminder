@@ -356,6 +356,11 @@ class AtkEngine(private val context: Context) {
     } else {
       @Suppress("DEPRECATION") Notification.Builder(context)
     }
+    // Link the notification to the active media session so the mediaPlayback foreground service
+    // is recognised as genuine media playback and not killed while the screen is locked.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+      AtkAlarmSound.sessionToken()?.let { builder.setMediaSession(it) }
+    }
     return builder
       .setSmallIcon(R.drawable.ic_atk_stat)
       .setContentTitle(item.name.ifBlank { "定时提醒" })

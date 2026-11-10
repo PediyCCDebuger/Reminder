@@ -238,7 +238,7 @@ fun TimerApp() {
               }
               try { context.startActivity(Intent.createChooser(send, "分享好友")) } catch (e: Exception) { }
             }
-            5 -> message = "当前已是最新版本（2.4.0），无需更新。"
+            5 -> message = "当前已是最新版本（${com.lentikr.reminder.BuildConfig.VERSION_NAME}），无需更新。"
             6 -> {
               try {
                 context.startActivity(
@@ -435,7 +435,7 @@ fun TimerApp() {
       val crash = AtkCrash.last(context)
       AtkMessageDialog(
         title = "关于软件",
-        body = "Reminder 2.4.0 · AddinTimer 定时部分复刻版\n" +
+        body = "Reminder ${com.lentikr.reminder.BuildConfig.VERSION_NAME} · AddinTimer 定时部分复刻版\n" +
           "数据格式与 AddinTimer 2.1G 完全一致，可导入 / 导出 .atk 备份。\n" +
           "导入时逐字节保留激活状态与分类，不自动启用任何任务。\n" +
           "已去除原版未注册版的激活数量上限，任意多条提醒可同时启用。\n" +

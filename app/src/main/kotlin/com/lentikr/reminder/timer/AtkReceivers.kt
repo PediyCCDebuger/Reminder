@@ -9,6 +9,8 @@ import android.media.AudioAttributes
 import android.media.MediaPlayer
 import android.media.Ringtone
 import android.media.RingtoneManager
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -83,6 +85,11 @@ object AtkAlarmSound {
   private var rampTask: Runnable? = null
   private var currentId = -1L
   private var active = false
+  // An active media session legitimates the mediaPlayback foreground service: without it,
+  // Android 14+ kills the service ~1s after startForeground because the mediaPlayback type
+  // is "misused" (no session). That kill took the ringtone down with it, which is exactly the
+  // "锁屏 / 退到后台就听不到闹钟" symptom.
+  private var mediaSession: MediaSession? = null
 
   fun isPlaying(): Boolean = active
 
@@ -130,7 +137,37 @@ object AtkAlarmSound {
     }
 
     startVibration(app, item)
+    // Activate the media session AFTER the player is up so the mediaPlayback foreground service
+    // is genuinely playing media when startForeground claims that type.
+    activateSession(app)
   }
+
+  /**
+   * Create and activate a media session while the alarm rings. Android 14+ only keeps a
+   * `mediaPlayback` foreground service alive (and out of the "abusing FGS type" bucket) when an
+   * active session exists; without it the system tears the service down within ~1 second, which
+   * silenced the ringtone the moment the user left the app. The session is released in [stop()].
+   */
+  private fun activateSession(context: Context) {
+    try {
+      val ms = MediaSession(context.applicationContext, "AddinTimer:alarm")
+      ms.setCallback(object : MediaSession.Callback() {})
+      ms.setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS)
+      val state = PlaybackState.Builder()
+        .setState(PlaybackState.STATE_PLAYING, PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1f)
+        .setActions(PlaybackState.ACTION_PLAY)
+        .build()
+      ms.setPlaybackState(state)
+      ms.isActive = true
+      mediaSession?.release()
+      mediaSession = ms
+    } catch (e: Exception) {
+      AtkDiag.log(context, "音: MediaSession 创建失败 ${e.javaClass.simpleName}: ${e.message}")
+    }
+  }
+
+  /** Exposed so the alarm notification can be linked to the session (Android 21+). */
+  fun sessionToken(): MediaSession.Token? = try { mediaSession?.sessionToken } catch (e: Exception) { null }
 
   private fun startPlayer(context: Context, uri: android.net.Uri, volume: Float): Boolean = try {
     val p = MediaPlayer()
@@ -234,6 +271,11 @@ object AtkAlarmSound {
     }
     rampTask = null
     handler = null
+    try {
+      mediaSession?.release()
+    } catch (e: Exception) {
+    }
+    mediaSession = null
     try {
       player?.let { if (it.isPlaying) it.stop() }
     } catch (e: Exception) {

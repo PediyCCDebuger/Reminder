@@ -84,6 +84,13 @@ class AtkAlarmService : Service() {
     acquireWakeLock()
     engine.ensureChannel()
 
+    // Play the tone FIRST so the mediaPlayback foreground service is genuinely playing media by
+    // the time startForeground() claims that type. Android 14+ tears down a mediaPlayback FGS that
+    // has no active media session within ~1s, which is exactly why the alarm went silent the
+    // moment the app was backgrounded. The receiver may already have started this exact tone;
+    // play() is a no-op in that case.
+    AtkAlarmSound.play(this, item)
+
     val foregrounded = enterForeground(engine, item, id.toInt())
     if (!foregrounded) {
       // Being killed at the 5 s mark would cut the tone, so stop being a "started" service and
@@ -91,8 +98,6 @@ class AtkAlarmService : Service() {
       AtkDiag.log(this, "svc: 无法进入前台，改为在本进程播铃")
     }
 
-    // The receiver may already have started this exact tone; play() is a no-op in that case.
-    AtkAlarmSound.play(this, item)
     engine.showNotification(item)
     runCatching { AtkStore(this).log(id, 1, item.name) }
     runCatching { engine.schedule(item) }
@@ -237,7 +242,11 @@ class AtkAlarmService : Service() {
     // NOT stopped here: every explicit stop path (终止 / 贪睡 / 静音 / the notification actions)
     // already stops it, and destroying the service while the 执行界面 is still ringing must not
     // silence the alarm.
-    AtkDiag.log(this, "svc: onDestroy")
+    // The foreground / wakelock flags tell 权限自检 → 触发日志 whether this was a normal stop
+    // (foreground already false, e.g. 终止 / 贪睡) or an unexpected kill by the system / OEM
+    // (foreground still true here means the FGS was torn down externally — the root cause of
+    // "锁屏 / 退到后台就听不到闹钟").
+    AtkDiag.log(this, "svc: onDestroy（前台=$foreground, 仍持唤醒锁=${wakeLock?.isHeld == true}）")
     releaseWakeLock()
     if (foreground) {
       try {

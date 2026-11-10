@@ -2,6 +2,15 @@
 
 每个 Release 的说明都取自本文件对应版本的小节，由打包工作流自动写入 GitHub Release。
 
+## [2.8.0] - 2026-11-10
+
+### 修复（真机反馈）
+- **退到后台 / 锁屏后闹钟不响、只有解锁点通知才响**：根因是前台服务声明了 `mediaPlayback` 前台服务类型，却没有配套的活跃 `MediaSession`。Android 14+ 会在 `startForeground` 后约 1 秒以「滥用 mediaPlayback 类型」为由直接杀掉该前台服务，铃声随进程一起被掐断——日志里 `svc: onStartCommand` 成功、`音: MediaPlayer 起播` 成功、紧接着 `svc: onDestroy` 就是铁证。修复：① 起播前先创建并激活一个 `MediaSession`（状态置为 PLAYING），并把它的 token 绑到闹钟通知上，使 `mediaPlayback` 前台服务名正言顺；② `onStartCommand` 里把 `AtkAlarmSound.play()` 提到 `startForeground` **之前**，确保声明该类型时确实已经在播放；③ `onDestroy` 日志新增「前台=…/仍持唤醒锁=…」，一眼区分「正常停止」还是「被系统/OEM 强杀」。
+- **关于里版本号还显示 2.4**：「关于软件」弹窗与「检查更新」提示里的版本号是写死的 `2.4.0`，与设置页的 `BuildConfig.VERSION_NAME` 脱节。改为读取 `BuildConfig.VERSION_NAME`，今后随打包自动更新。
+
+### 变更
+- 启动图标（安装包图标）正式改为 AddinTimer 原版图标（时钟 + 绿色循环箭头）：之前只在本地放了图标 PNG、从未提交，且仓库里仍残留自适应图标 `mipmap-anydpi-v26`（旧 Reminder 风格），导致你装到的包依旧是旧图标。本次把各密度 `ic_launcher.png` / `ic_launcher_round.png`（AddinTimer 原版）提交进仓库，并删除 `mipmap-anydpi-v26` 自适应图标覆盖，使 Android 8+ 也使用原版 PNG。
+
 ## [2.7.0] - 2026-11-10
 
 ### 修复（真机反馈）
