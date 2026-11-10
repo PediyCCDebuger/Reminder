@@ -14,6 +14,8 @@
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- The alarm rings through a foreground service of type mediaPlayback. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <!-- Optional, user-granted: letting the alarm surface pop up over other apps on ROMs that
          ignore full-screen intents. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
@@ -65,12 +67,14 @@
             </intent-filter>
         </receiver>
 
-        <!-- Keeps a firing alarm ringing while the screen is locked (Android 14+ refuses
-             full-screen intents without the user-granted 全屏通知 permission). -->
+        <!-- Keeps a firing alarm ringing while the screen is locked: hold a wake lock, play the
+             configured tone and keep the full-screen notification up until 终止 / 贪睡.
+             mediaPlayback is the honest type (we are playing audio); specialUse stays declared
+             as the fallback for ROMs that reject the combination. -->
         <service
             android:name=".timer.AtkAlarmService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
+            android:foregroundServiceType="mediaPlayback|specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="alarm_ringing" />

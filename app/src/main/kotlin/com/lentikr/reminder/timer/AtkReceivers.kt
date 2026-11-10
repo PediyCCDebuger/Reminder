@@ -6,10 +6,14 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
+import android.media.MediaPlayer
 import android.media.Ringtone
 import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -61,65 +65,187 @@ import java.util.Locale
  * The alarm sound belongs to the 任务执行界面 itself, not to the notification channel: some
  * ROMs silently downgrade notification importance, and then the timer would fire with no sound.
  * A single shared player lets the notification actions (终止 / 贪睡) stop it from the receiver.
+ *
+ * 2.6.0 switched from [Ringtone] to [MediaPlayer] because the ALARM parameters require control
+ * the Ringtone API does not offer:
+ *   act[9]  音量大小  → maximum volume (不改变 / 10%..100%)
+ *   act[10] 渐响模式  → ramp from ~10% of that volume to the maximum over 10..90 seconds
+ *   act[12] 振动类型  → 无振动 / 跟随音乐起停 / 音乐前振动10–30秒
+ * Ringtone can only start at full volume, which is exactly the "渐强被忽略，一上来就是最高音量"
+ * complaint. MediaPlayer also takes a partial wake lock of its own (setWakeMode), so the tone
+ * keeps playing with the screen off instead of being frozen a second after it starts.
  */
 object AtkAlarmSound {
+  private var player: MediaPlayer? = null
   private var ringtone: Ringtone? = null
   private var vibrator: Vibrator? = null
+  private var handler: Handler? = null
+  private var rampTask: Runnable? = null
+  private var currentId = -1L
+  private var active = false
+
+  fun isPlaying(): Boolean = active
 
   /**
    * Play the tone configured on [item] (act[6] 铃声类型 + act[7] 选择路径). Passing null keeps
-   * the old behaviour of the system default alarm tone. Vibration always runs while the task
-   * rings, matching the original 振动类型 default.
+   * the old behaviour of the system default alarm tone.
+   *
+   * The call is idempotent for the same task: the receiver starts the tone first (so a locked
+   * screen rings the instant the alarm fires), then the foreground service and later the
+   * 执行界面 call play() again for the same task and must not restart it from the beginning.
    */
-  fun play(context: Context, item: AtkItem? = null) {
-    stop()
-    try {
-      val uri = if (item != null) {
-        AtkRingtone.resolve(context, item)
-      } else {
-        AtkRingtone.defaultAlarm(context)
-      }
-      if (uri != null) {
-        val r = RingtoneManager.getRingtone(context, uri)
-        if (r != null) {
-          // Ringtone loops by default, but be explicit: some ROMs hand back a one-shot player.
-          try { r.isLooping = true } catch (e: Exception) { }
-          r.audioAttributes = AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_ALARM)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-            .build()
-          r.play()
-          ringtone = r
-        }
-      }
-    } catch (e: Exception) {
-      // No alarm tone configured on this device: vibration below still works.
+  fun play(context: Context, item: AtkItem? = null, force: Boolean = false) {
+    val app = context.applicationContext
+    val itemId = item?.id ?: -1L
+    if (!force && active && currentId == itemId) {
+      AtkDiag.log(app, "音: 任务 $itemId 正在播放，跳过重复调用")
+      return
     }
-    try {
-      val vib: Vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+    stop()
+    currentId = itemId
+
+    val uri = try {
+      if (item != null) AtkRingtone.resolve(app, item) else AtkRingtone.defaultAlarm(app)
+    } catch (e: Exception) {
+      null
+    }
+
+    // 音量大小 (act[9]): 0 = 不改变 → full; n = n*10%.
+    val volMode = item?.let { AtkItem.intOf(it.actValue(9)) } ?: 0
+    val maxVol = if (volMode <= 0) 1f else (volMode * 10).coerceIn(10, 100) / 100f
+    // 渐响模式 (act[10]): 0 = 立即; n = 渐响 n*10 秒.
+    val rampMode = item?.let { AtkItem.intOf(it.actValue(10)) } ?: 0
+    val rampSeconds = (rampMode * 10).coerceIn(0, 90)
+    val startVol = if (rampSeconds > 0) (maxVol * 0.12f).coerceAtLeast(0.02f) else maxVol
+
+    if (uri == null) {
+      AtkDiag.log(app, "音: act[7]=「无」，只振动")
+    } else if (startPlayer(app, uri, startVol)) {
+      AtkDiag.log(app, "音: MediaPlayer 起播 目标音量=${(maxVol * 100).toInt()}% 渐响=${rampSeconds}s")
+      if (rampSeconds > 0) scheduleRamp(startVol, maxVol, rampSeconds)
+    } else if (startRingtone(app, uri)) {
+      AtkDiag.log(app, "音: MediaPlayer 失败，回退 Ringtone（无渐响）")
+    } else {
+      AtkDiag.log(app, "音: 无法播放 $uri")
+    }
+
+    startVibration(app, item)
+  }
+
+  private fun startPlayer(context: Context, uri: android.net.Uri, volume: Float): Boolean = try {
+    val p = MediaPlayer()
+    p.setAudioAttributes(
+      AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_ALARM)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+        .build(),
+    )
+    // Keeps the CPU alive for the whole ring even with the screen off.
+    p.setWakeMode(context, PowerManager.PARTIAL_WAKE_LOCK)
+    p.setDataSource(context, uri)
+    p.isLooping = true
+    p.setOnErrorListener { _, _, _ -> true }
+    p.setVolume(volume, volume)
+    p.prepare()
+    p.start()
+    player = p
+    active = true
+    true
+  } catch (e: Exception) {
+    AtkDiag.log(context, "音: MediaPlayer 异常 ${e.javaClass.simpleName}: ${e.message}")
+    try { player?.release() } catch (ignored: Exception) { }
+    player = null
+    active = false
+    false
+  }
+
+  private fun startRingtone(context: Context, uri: android.net.Uri): Boolean = try {
+    val r = RingtoneManager.getRingtone(context, uri)
+    if (r == null) {
+      false
+    } else {
+      try { r.isLooping = true } catch (e: Exception) { }
+      r.audioAttributes = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_ALARM)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+        .build()
+      r.play()
+      ringtone = r
+      active = true
+      true
+    }
+  } catch (e: Exception) {
+    false
+  }
+
+  /** Raise MediaPlayer's own volume 1% per tick so 渐响 really starts quiet. */
+  private fun scheduleRamp(from: Float, to: Float, seconds: Int) {
+    val h = Handler(Looper.getMainLooper())
+    handler = h
+    var step = 0
+    val task = object : Runnable {
+      override fun run() {
+        step++
+        val ratio = step.toFloat() / seconds
+        val v = (from + (to - from) * ratio).coerceIn(0f, 1f)
+        try { player?.setVolume(v, v) } catch (e: Exception) { }
+        if (step < seconds) h.postDelayed(this, 1000L)
+      }
+    }
+    rampTask = task
+    h.postDelayed(task, 1000L)
+  }
+
+  /** 振动类型 (act[12]): 0 无振动 / 1 跟随音乐起停 / 2..4 音乐前振动 10..30 秒. */
+  private fun startVibration(context: Context, item: AtkItem?) {
+    val mode = item?.let { AtkItem.intOf(it.actValue(12)) } ?: 1
+    if (mode <= 0) return
+    val vib: Vibrator = try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
       } else {
         @Suppress("DEPRECATION")
         context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
       }
-      if (vib.hasVibrator()) {
-        val pattern = longArrayOf(0, 500, 400, 500)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-          vib.vibrate(VibrationEffect.createWaveform(pattern, 0))
-        } else {
-          @Suppress("DEPRECATION") vib.vibrate(pattern, 0)
-        }
-        vibrator = vib
+    } catch (e: Exception) {
+      return
+    }
+    try {
+      if (!vib.hasVibrator()) return
+      if (mode == 1) {
+        vib.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 700, 500, 700, 900), 0))
+      } else {
+        // 10 s per step: five 2-second cycles (450 ms on / 550 ms off).
+        val cycles = mode * 5
+        val pattern = LongArray(cycles * 2 + 1)
+        pattern[0] = 0L
+        for (i in 0 until cycles * 2) pattern[i + 1] = if (i % 2 == 0) 450L else 550L
+        vib.vibrate(VibrationEffect.createWaveform(pattern, -1))
       }
+      vibrator = vib
     } catch (e: Exception) {
     }
   }
 
   fun stop() {
+    try {
+      rampTask?.let { handler?.removeCallbacks(it) }
+    } catch (e: Exception) {
+    }
+    rampTask = null
+    handler = null
+    try {
+      player?.let { if (it.isPlaying) it.stop() }
+    } catch (e: Exception) {
+    }
+    try { player?.release() } catch (e: Exception) { }
+    player = null
     try { ringtone?.stop() } catch (e: Exception) { }
     ringtone = null
     try { vibrator?.cancel() } catch (e: Exception) { }
     vibrator = null
+    active = false
+    currentId = -1L
   }
 }
 
@@ -140,10 +266,15 @@ class AtkReceiver : BroadcastReceiver() {
 
       AtkEngine.ACTION_FIRE -> {
         val item = if (id >= 0) store.get(id) else null
+        AtkDiag.log(
+          context,
+          "触发 id=$id 任务=${item?.name ?: "查不到"} 启用=${item?.enabled}",
+        )
         if (item != null && item.enabled) {
+          // Sound first, straight from the receiver. If the process is torn down before the
+          // service is up, the tone has already started instead of the alarm staying silent.
+          AtkAlarmSound.play(context, item)
           engine.ensureChannel()
-          // Post the HIGH + full-screen notification first: it is the primary path that lets
-          // Android bring the surface up over the keyguard, independent of the service start.
           engine.showNotification(item)
           startAlarmService(context, engine, id)
           store.log(id, 1, item.name)
@@ -154,7 +285,9 @@ class AtkReceiver : BroadcastReceiver() {
 
       "app.lentikr.reminder.ATK_SNOOZE_FIRE" -> {
         val item = if (id >= 0) store.get(id) else null
+        AtkDiag.log(context, "贪睡到点 id=$id 任务=${item?.name}")
         if (item != null && item.enabled) {
+          AtkAlarmSound.play(context, item)
           engine.showNotification(item)
           startAlarmService(context, engine, id)
           store.log(id, 2, item.name + " 贪睡")
@@ -162,6 +295,7 @@ class AtkReceiver : BroadcastReceiver() {
       }
 
       AtkEngine.ACTION_SNOOZE -> {
+        AtkDiag.log(context, "贪睡 id=$id")
         AtkAlarmSound.stop()
         stopAlarmService(context)
         engine.dismiss(id)
@@ -183,6 +317,7 @@ class AtkReceiver : BroadcastReceiver() {
       }
 
       AtkEngine.ACTION_STOP -> {
+        AtkDiag.log(context, "终止 id=$id")
         AtkAlarmSound.stop()
         stopAlarmService(context)
         engine.dismiss(id)
@@ -193,7 +328,8 @@ class AtkReceiver : BroadcastReceiver() {
   /**
    * A real firing runs through [AtkAlarmService]: a foreground service survives the broadcast and
    * keeps ringing while the screen is locked. Android 12+ can refuse a background FGS start, so
-   * fall back to the notification + direct launch instead of dropping the alarm.
+   * the tone is already playing (see ACTION_FIRE) and the full-screen notification still opens
+   * the 执行界面 if the service is rejected.
    */
   private fun startAlarmService(context: Context, engine: AtkEngine, id: Long) {
     val svc = Intent(context, AtkAlarmService::class.java).apply {
@@ -206,9 +342,11 @@ class AtkReceiver : BroadcastReceiver() {
       } else {
         context.startService(svc)
       }
+      AtkDiag.log(context, "前台服务: 启动请求已发出")
     } catch (e: Exception) {
+      AtkDiag.log(context, "前台服务: 启动被拒 ${e.javaClass.simpleName}: ${e.message}")
       val item = runCatching { AtkStore(context).get(id) }.getOrNull() ?: return
-      // FGS refused: at least start the tone from the receiver so a locked screen still rings.
+      // FGS refused: the tone is already running in this process, just open the surface too.
       AtkAlarmSound.play(context, item)
       engine.showNotification(item)
       engine.launchAlarmFace(id)
@@ -249,6 +387,7 @@ class AtkAlarmActivity : ComponentActivity() {
     // Theme.Reminder.Alarm already sets black system bars with light icons.
     faceId.value = intent.getLongExtra(AtkEngine.EXTRA_ID, -1L)
     val engine = AtkEngine(this)
+    AtkDiag.log(this, "执行界面: 打开 id=${faceId.value}")
     AtkAlarmSound.play(this, loadItem(faceId.value))
     // Back also terminates the current alarm, exactly like the 终止 button.
     onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -265,7 +404,14 @@ class AtkAlarmActivity : ComponentActivity() {
       AtkTheme {
         AlarmFace(
           item = item,
-          onMute = { AtkAlarmSound.stop(); engine.dismiss(id) },
+          // 静音 only silences the tone; the 执行界面 stays up so 贪睡 / 终止 are still reachable.
+          // The foreground service is stopped with it, otherwise cancelling its notification
+          // from here would leave a "foreground without notification" service behind.
+          onMute = {
+            AtkAlarmSound.stop()
+            stopService(Intent(this@AtkAlarmActivity, AtkAlarmService::class.java))
+            engine.dismiss(id)
+          },
           onSnooze = {
             AtkAlarmSound.stop()
             stopService(Intent(this@AtkAlarmActivity, AtkAlarmService::class.java))

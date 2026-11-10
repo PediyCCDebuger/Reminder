@@ -834,7 +834,10 @@ private fun BackupEntry(text: String, onClick: () -> Unit) {
 
 @Composable
 private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
+  val context = LocalContext.current
   var version by remember { mutableIntStateOf(0) }
+  var showLog by remember { mutableStateOf(false) }
+  var logText by remember { mutableStateOf("") }
   val report = remember(version) { engine.permissionReport() }
   Column(Modifier.fillMaxSize()) {
     AtkTitleBar("权限自检", onBack = onBack)
@@ -858,15 +861,50 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
       item {
         AtkSettingRow("刷新状态", "重新检测以上权限", onClick = { version++ })
       }
+      item { AtkSection("诊断") }
+      item {
+        AtkSettingRow("触发日志", "最近 200 条：触发 / 前台服务 / 播铃 / 执行界面", onClick = {
+          logText = AtkDiag.text(context)
+          showLog = true
+        })
+      }
       item {
         Text(
           "锁屏闹钟必须开启「全屏通知」，否则到点只在通知栏提示，要解锁后点通知才会打开执行界面。" +
             "一加 13 / ColorOS 另外还需要：允许自动启动、允许后台运行、允许锁屏显示、电池策略设为不限制。" +
-            "任何一项缺失都可能导致提醒不响或延迟。",
+            "任何一项缺失都可能导致提醒不响或延迟。到点不响时请先看「触发日志」：没有记录说明闹钟没被系统唤醒，" +
+            "有记录但没有「起播」说明铃声/音频被拦。",
           color = AtkSkin.sectionText,
           fontSize = 13.sp,
           modifier = Modifier.padding(12.dp),
         )
+      }
+    }
+  }
+  if (showLog) {
+    Dialog(onDismissRequest = { showLog = false }) {
+      Column(Modifier.fillMaxWidth().background(AtkSkin.lightPanel)) {
+        AtkDialogTitle("触发日志")
+        LazyColumn(Modifier.fillMaxWidth().height(420.dp)) {
+          items(logText.split("\n")) { line ->
+            Text(
+              line,
+              color = Color(0xFF202020),
+              fontSize = 12.sp,
+              modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
+            )
+          }
+        }
+        Row(Modifier.fillMaxWidth().background(Color(0xFFD2D2D2)).padding(8.dp)) {
+          AtkPlainButton("清空", Modifier.weight(1f)) {
+            AtkDiag.clear(context)
+            logText = AtkDiag.text(context)
+          }
+          Spacer(Modifier.width(8.dp))
+          AtkPlainButton("刷新", Modifier.weight(1f)) { logText = AtkDiag.text(context) }
+          Spacer(Modifier.width(8.dp))
+          AtkPlainButton("关闭", Modifier.weight(1f)) { showLog = false }
+        }
       }
     }
   }

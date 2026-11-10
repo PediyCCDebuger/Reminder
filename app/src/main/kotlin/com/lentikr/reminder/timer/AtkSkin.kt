@@ -456,7 +456,7 @@ fun AtkMessageDialog(
 }
 
 @Composable
-private fun AtkDialogTitle(text: String) {
+fun AtkDialogTitle(text: String) {
   Box(
     Modifier.fillMaxWidth().height(46.dp).background(AtkSkin.dialogBlue),
     contentAlignment = Alignment.CenterStart,

@@ -33,6 +33,16 @@ class AtkEngine(private val context: Context) {
     const val EXTRA_AT = "triggerAt"
     const val CHANNEL = "addintimer_alarm"
     /**
+     * The real firing notification. IMPORTANCE_HIGH + full-screen intent is the only supported way
+     * to bring a surface up over the keyguard, but the channel itself is silent: the tone comes
+     * from [AtkAlarmSound] so that 铃声类型 / 音量大小 / 渐响模式 / 振动类型 are honoured. A channel
+     * sound would play the system default alarm tone at full volume first, which is precisely the
+     * "渐强被忽略" behaviour.
+     * New id (rather than editing CHANNEL): a channel's importance and sound are immutable once
+     * created on Android 8+.
+     */
+    const val CHANNEL_ALARM_V2 = "addintimer_alarm_v2"
+    /**
      * Status-bar channel. IMPORTANCE_LOW/MIN channels never draw a status-bar icon on Android 8+,
      * which is why the persistent icon and the 测试执行 icon were invisible. IMPORTANCE_DEFAULT
      * draws the icon; sound/vibration are muted below so it still behaves quietly.
@@ -57,6 +67,19 @@ class AtkEngine(private val context: Context) {
         setBypassDnd(true)
       }
       notifications.createNotificationChannel(channel)
+      // Silent but MAX-importance: heads-up + full-screen intent, while the tone, its volume,
+      // its ramp and the vibration pattern are all produced by AtkAlarmSound.
+      val alarm = NotificationChannel(
+        CHANNEL_ALARM_V2, "闹钟提醒（渐响）", NotificationManager.IMPORTANCE_HIGH,
+      ).apply {
+        description = "到点提醒：声音由 App 按铃声类型/音量/渐响设置播放"
+        setSound(null, null)
+        enableVibration(false)
+        setShowBadge(true)
+        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        setBypassDnd(true)
+      }
+      notifications.createNotificationChannel(alarm)
       // Quiet but visible in the status bar: DEFAULT importance still renders the small icon,
       // while no sound / no vibration / no badge keeps it from disturbing the user.
       val status = NotificationChannel(
@@ -72,12 +95,19 @@ class AtkEngine(private val context: Context) {
     }
   }
 
+  /**
+   * The alarm PendingIntent starts [AtkAlarmService] as a foreground service, not a broadcast.
+   * Alarms fired from `setAlarmClock()` put the app on the temporary allowlist, so the service
+   * starts even when the app was cached/frozen — a plain broadcast to a frozen app can be held
+   * back by aggressive ROMs, which then looks like "到点不响，解锁后才响".
+   */
   private fun fireIntent(id: Long): PendingIntent {
-    val i = Intent(context, AtkReceiver::class.java).apply {
-      action = ACTION_FIRE
+    val i = Intent(context, AtkAlarmService::class.java).apply {
+      action = AtkAlarmService.ACTION_START
+      putExtra(AtkAlarmService.EXTRA_ACTION, AtkAlarmService.ACTION_START)
       putExtra(EXTRA_ID, id)
     }
-    return PendingIntent.getBroadcast(
+    return PendingIntent.getForegroundService(
       context, (id * 7 + 1).toInt(), i,
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
@@ -161,12 +191,15 @@ class AtkEngine(private val context: Context) {
     } catch (e: SecurityException) {
       // Exact-alarm permission missing (Android 13+/14+ or some ColorOS builds). Work down
       // the ladder so the timer still fires instead of silently doing nothing.
+      AtkDiag.log(context, "排程: setAlarmClock 被拒（${e.message}），改用 setExact")
       try {
         alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, ms, pi)
       } catch (e2: SecurityException) {
+        AtkDiag.log(context, "排程: setExact 也被拒（${e2.message}），改用非精确闹钟")
         try {
           alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, ms, pi)
         } catch (ignored: SecurityException) {
+          AtkDiag.log(context, "排程: 全部失败，任务 ${item.name} 无法定时")
         }
       }
     }
@@ -186,10 +219,37 @@ class AtkEngine(private val context: Context) {
     }
     try {
       context.startActivity(i)
+      AtkDiag.log(context, "执行界面: 已请求启动")
     } catch (e: Exception) {
       // Background activity launch may be restricted on some ROMs; the full-screen
       // notification intent still opens the same surface in that case.
+      AtkDiag.log(context, "执行界面: 启动被拦 ${e.javaClass.simpleName}: ${e.message}")
     }
+  }
+
+  /**
+   * Minimal notification for the last-resort `startForeground()` attempt: some ROMs reject the
+   * alarm notification itself (full-screen intent plus a MAX-importance channel), and being a
+   * foreground service at all is what keeps the tone alive.
+   */
+  fun buildFallbackNotification(item: AtkItem): Notification {
+    ensureChannel()
+    val open = alarmActivityIntent(item.id, (item.id * 7 + 3).toInt())
+    val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      Notification.Builder(context, CHANNEL_STATUS)
+    } else {
+      @Suppress("DEPRECATION") Notification.Builder(context)
+    }
+    return builder
+      .setSmallIcon(R.drawable.ic_atk_stat)
+      .setContentTitle(item.name.ifBlank { "定时提醒" })
+      .setContentText(alarmBody(item))
+      .setPriority(Notification.PRIORITY_DEFAULT)
+      .setCategory(Notification.CATEGORY_ALARM)
+      .setContentIntent(open)
+      .setAutoCancel(false)
+      .setOngoing(true)
+      .build()
   }
 
   /** Refresh only the persistent "下一次任务" notification, e.g. right after an alarm fires. */
@@ -232,7 +292,7 @@ class AtkEngine(private val context: Context) {
     val snooze = actionIntent(ACTION_SNOOZE, item.id, (item.id * 7 + 4).toInt())
     val stop = actionIntent(ACTION_STOP, item.id, (item.id * 7 + 5).toInt())
     val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      Notification.Builder(context, CHANNEL)
+      Notification.Builder(context, CHANNEL_ALARM_V2)
     } else {
       @Suppress("DEPRECATION") Notification.Builder(context)
     }
@@ -248,8 +308,6 @@ class AtkEngine(private val context: Context) {
       .setOngoing(true)
       .setContentIntent(full)
       .setFullScreenIntent(full, true)
-      .setSound(Settings.System.DEFAULT_ALARM_ALERT_URI, Notification.AUDIO_ATTRIBUTES_DEFAULT)
-      .setVibrate(longArrayOf(0, 400, 300, 400))
       .addAction(R.drawable.ic_atk_stat, "贪睡 10 分钟", snooze)
       .addAction(R.drawable.ic_atk_stat, "终止提醒", stop)
       .build()
