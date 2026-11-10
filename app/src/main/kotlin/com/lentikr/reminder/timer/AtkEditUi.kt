@@ -518,7 +518,7 @@ private fun TimeStepChip(label: String, selected: Boolean, onClick: () -> Unit) 
   Box(
     Modifier
       .height(30.dp)
-      .background(if (selected) Color(0xFF1490DE) else AtkSkin.silver)
+      .background(if (selected) SolidColor(Color(0xFF1490DE)) else AtkSkin.silver)
       .border(1.dp, if (selected) Color(0xFF0F6FA8) else Color(0xFF9A9A9A))
       .clickable(onClick = onClick)
       .padding(horizontal = 9.dp),

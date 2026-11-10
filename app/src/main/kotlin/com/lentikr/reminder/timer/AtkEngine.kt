@@ -169,8 +169,26 @@ class AtkEngine(private val context: Context) {
     }
   }
 
+  /**
+   * The broadcast PendingIntent used up to 2.5.0. Alarms armed by the previous build are still
+   * registered in the system after an update, and `AlarmManager.cancel()` only matches the exact
+   * same PendingIntent type — without this, one stale broadcast alarm per task would fire on top
+   * of the new service-backed one and ring twice.
+   */
+  private fun legacyFireIntent(id: Long): PendingIntent {
+    val i = Intent(context, AtkReceiver::class.java).apply {
+      action = ACTION_FIRE
+      putExtra(EXTRA_ID, id)
+    }
+    return PendingIntent.getBroadcast(
+      context, (id * 7 + 1).toInt(), i,
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+  }
+
   fun schedule(item: AtkItem) {
     val pi = fireIntent(item.id)
+    runCatching { alarms.cancel(legacyFireIntent(item.id)) }
     if (!item.enabled) {
       alarms.cancel(pi)
       return
