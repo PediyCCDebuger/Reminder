@@ -7,7 +7,6 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.media.session.MediaSession
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
@@ -356,12 +355,6 @@ class AtkEngine(private val context: Context) {
       Notification.Builder(context, CHANNEL_ALARM_V2)
     } else {
       @Suppress("DEPRECATION") Notification.Builder(context)
-    }
-    // Link the notification to the active media session so the mediaPlayback foreground service
-    // is recognised as genuine media playback and not killed while the screen is locked.
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-      val sessionToken = AtkAlarmSound.sessionToken()
-      if (sessionToken != null) builder.setMediaSession(sessionToken)
     }
     return builder
       .setSmallIcon(R.drawable.ic_atk_stat)
