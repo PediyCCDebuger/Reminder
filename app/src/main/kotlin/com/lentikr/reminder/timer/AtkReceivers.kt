@@ -13,7 +13,6 @@ import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -67,19 +66,31 @@ object AtkAlarmSound {
   private var ringtone: Ringtone? = null
   private var vibrator: Vibrator? = null
 
-  fun play(context: Context) {
+  /**
+   * Play the tone configured on [item] (act[6] 铃声类型 + act[7] 选择路径). Passing null keeps
+   * the old behaviour of the system default alarm tone. Vibration always runs while the task
+   * rings, matching the original 振动类型 default.
+   */
+  fun play(context: Context, item: AtkItem? = null) {
     stop()
     try {
-      val uri = RingtoneManager.getActualDefaultRingtoneUri(context, RingtoneManager.TYPE_ALARM)
-        ?: Settings.System.DEFAULT_ALARM_ALERT_URI
-      val r = RingtoneManager.getRingtone(context, uri)
-      if (r != null) {
-        r.audioAttributes = AudioAttributes.Builder()
-          .setUsage(AudioAttributes.USAGE_ALARM)
-          .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-          .build()
-        r.play()
-        ringtone = r
+      val uri = if (item != null) {
+        AtkRingtone.resolve(context, item)
+      } else {
+        AtkRingtone.defaultAlarm(context)
+      }
+      if (uri != null) {
+        val r = RingtoneManager.getRingtone(context, uri)
+        if (r != null) {
+          // Ringtone loops by default, but be explicit: some ROMs hand back a one-shot player.
+          try { r.isLooping = true } catch (e: Exception) { }
+          r.audioAttributes = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ALARM)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+            .build()
+          r.play()
+          ringtone = r
+        }
       }
     } catch (e: Exception) {
       // No alarm tone configured on this device: vibration below still works.
@@ -131,10 +142,7 @@ class AtkReceiver : BroadcastReceiver() {
         val item = if (id >= 0) store.get(id) else null
         if (item != null && item.enabled) {
           engine.ensureChannel()
-          engine.showNotification(item)
-          // Full-screen intent is the primary path on a locked screen; the explicit launch is
-          // a fallback for ROMs that downgrade the notification (singleTop avoids duplicates).
-          engine.launchAlarmFace(id)
+          startAlarmService(context, engine, id)
           store.log(id, 1, item.name)
           engine.schedule(item)
           engine.refreshNext()
@@ -144,14 +152,14 @@ class AtkReceiver : BroadcastReceiver() {
       "app.lentikr.reminder.ATK_SNOOZE_FIRE" -> {
         val item = if (id >= 0) store.get(id) else null
         if (item != null && item.enabled) {
-          engine.showNotification(item)
-          engine.launchAlarmFace(id)
+          startAlarmService(context, engine, id)
           store.log(id, 2, item.name + " 贪睡")
         }
       }
 
       AtkEngine.ACTION_SNOOZE -> {
         AtkAlarmSound.stop()
+        stopAlarmService(context)
         engine.dismiss(id)
         val alarms = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val pi = PendingIntent.getBroadcast(
@@ -172,8 +180,41 @@ class AtkReceiver : BroadcastReceiver() {
 
       AtkEngine.ACTION_STOP -> {
         AtkAlarmSound.stop()
+        stopAlarmService(context)
         engine.dismiss(id)
       }
+    }
+  }
+
+  /**
+   * A real firing runs through [AtkAlarmService]: a foreground service survives the broadcast and
+   * keeps ringing while the screen is locked. Android 12+ can refuse a background FGS start, so
+   * fall back to the notification + direct launch instead of dropping the alarm.
+   */
+  private fun startAlarmService(context: Context, engine: AtkEngine, id: Long) {
+    val svc = Intent(context, AtkAlarmService::class.java).apply {
+      putExtra(AtkAlarmService.EXTRA_ACTION, AtkAlarmService.ACTION_START)
+      putExtra(AtkEngine.EXTRA_ID, id)
+    }
+    try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        context.startForegroundService(svc)
+      } else {
+        context.startService(svc)
+      }
+    } catch (e: Exception) {
+      val item = runCatching { AtkStore(context).get(id) }.getOrNull() ?: return
+      // FGS refused: at least start the tone from the receiver so a locked screen still rings.
+      AtkAlarmSound.play(context, item)
+      engine.showNotification(item)
+      engine.launchAlarmFace(id)
+    }
+  }
+
+  private fun stopAlarmService(context: Context) {
+    try {
+      context.stopService(Intent(context, AtkAlarmService::class.java))
+    } catch (e: Exception) {
     }
   }
 }
@@ -204,26 +245,26 @@ class AtkAlarmActivity : ComponentActivity() {
     // Theme.Reminder.Alarm already sets black system bars with light icons.
     faceId.value = intent.getLongExtra(AtkEngine.EXTRA_ID, -1L)
     val engine = AtkEngine(this)
-    AtkAlarmSound.play(this)
+    AtkAlarmSound.play(this, loadItem(faceId.value))
     // Back also terminates the current alarm, exactly like the 终止 button.
     onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
       override fun handleOnBackPressed() {
         AtkAlarmSound.stop()
+        stopService(Intent(this@AtkAlarmActivity, AtkAlarmService::class.java))
         AtkEngine(this@AtkAlarmActivity).dismiss(faceId.value)
         finish()
       }
     })
     setContent {
       val id by faceId
-      val item = remember(id) {
-        if (id >= 0) AtkStore(this@AtkAlarmActivity).get(id) else null
-      }
+      val item = remember(id) { loadItem(id) }
       AtkTheme {
         AlarmFace(
           item = item,
           onMute = { AtkAlarmSound.stop(); engine.dismiss(id) },
           onSnooze = {
             AtkAlarmSound.stop()
+            stopService(Intent(this@AtkAlarmActivity, AtkAlarmService::class.java))
             sendBroadcast(Intent(this, AtkReceiver::class.java).apply {
               action = AtkEngine.ACTION_SNOOZE
               putExtra(AtkEngine.EXTRA_ID, id)
@@ -232,6 +273,7 @@ class AtkAlarmActivity : ComponentActivity() {
           },
           onStop = {
             AtkAlarmSound.stop()
+            stopService(Intent(this@AtkAlarmActivity, AtkAlarmService::class.java))
             engine.dismiss(id)
             finish()
           },
@@ -240,11 +282,14 @@ class AtkAlarmActivity : ComponentActivity() {
     }
   }
 
+  private fun loadItem(id: Long): AtkItem? =
+    if (id >= 0) runCatching { AtkStore(this).get(id) }.getOrNull() else null
+
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     setIntent(intent)
     faceId.value = intent.getLongExtra(AtkEngine.EXTRA_ID, -1L)
-    AtkAlarmSound.play(this)
+    AtkAlarmSound.play(this, loadItem(faceId.value))
   }
 
   override fun onDestroy() {
@@ -353,7 +398,8 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
         }
       }
       Spacer(Modifier.weight(1f))
-      // The original uses three equal, divider-separated icon-only buttons (no text labels).
+      // Three equal, divider-separated buttons with icon + label, matching the build the user
+      // preferred over the icon-only variant.
       Row(
         Modifier
           .fillMaxWidth()
@@ -361,11 +407,11 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
           .background(Brush.verticalGradient(listOf(Color(0xFF3A3A3A), Color(0xFF1A1A1A))))
           .border(1.dp, Color(0xFF555555)),
       ) {
-        AlarmFaceButton("♪", Modifier.weight(1f), onMute)
+        AlarmFaceButton("♪", "静音", Modifier.weight(1f), onMute)
         AlarmFaceDivider()
-        AlarmFaceButton("◷", Modifier.weight(1f), onSnooze)
+        AlarmFaceButton("◷", "贪睡", Modifier.weight(1f), onSnooze)
         AlarmFaceDivider()
-        AlarmFaceButton("ⓘ", Modifier.weight(1f), onStop)
+        AlarmFaceButton("ⓘ", "终止", Modifier.weight(1f), onStop)
       }
     }
   }
@@ -377,19 +423,23 @@ private fun AlarmFaceDivider() {
 }
 
 @Composable
-private fun AlarmFaceButton(symbol: String, modifier: Modifier, onClick: () -> Unit) {
+private fun AlarmFaceButton(symbol: String, label: String, modifier: Modifier, onClick: () -> Unit) {
   Box(
     modifier.fillMaxHeight().clickable(onClick = onClick),
     contentAlignment = Alignment.Center,
   ) {
-    Box(
-      Modifier
-        .size(38.dp)
-        .clip(CircleShape)
-        .border(2.dp, AtkSkin.green, CircleShape),
-      contentAlignment = Alignment.Center,
-    ) {
-      Text(symbol, color = AtkSkin.green, fontSize = 21.sp)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Box(
+        Modifier
+          .size(34.dp)
+          .clip(CircleShape)
+          .border(2.dp, AtkSkin.green, CircleShape),
+        contentAlignment = Alignment.Center,
+      ) {
+        Text(symbol, color = AtkSkin.green, fontSize = 20.sp)
+      }
+      Spacer(Modifier.width(6.dp))
+      Text(label, color = Color(0xFFDDDDDD), fontSize = 14.sp)
     }
   }
 }

@@ -850,6 +850,7 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
               name.contains("通知") && !name.contains("全屏") -> engine.openNotificationSettings()
               name.contains("电池") -> engine.openBatterySettings()
               name.contains("全屏") -> engine.openFullScreenSettings()
+              name.contains("悬浮窗") -> engine.openOverlaySettings()
             }
           },
         )
@@ -859,7 +860,8 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
       }
       item {
         Text(
-          "一加 13 / ColorOS 还需要：允许自动启动、允许后台运行、电池策略设为不限制。" +
+          "锁屏闹钟必须开启「全屏通知」，否则到点只在通知栏提示，要解锁后点通知才会打开执行界面。" +
+            "一加 13 / ColorOS 另外还需要：允许自动启动、允许后台运行、允许锁屏显示、电池策略设为不限制。" +
             "任何一项缺失都可能导致提醒不响或延迟。",
           color = AtkSkin.sectionText,
           fontSize = 13.sp,

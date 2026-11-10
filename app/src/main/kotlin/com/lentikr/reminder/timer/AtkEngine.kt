@@ -32,7 +32,14 @@ class AtkEngine(private val context: Context) {
     const val EXTRA_ID = "timerid"
     const val EXTRA_AT = "triggerAt"
     const val CHANNEL = "addintimer_alarm"
-    private const val CHANNEL_NEXT = "addintimer_next"
+    /**
+     * Status-bar channel. IMPORTANCE_LOW/MIN channels never draw a status-bar icon on Android 8+,
+     * which is why the persistent icon and the 测试执行 icon were invisible. IMPORTANCE_DEFAULT
+     * draws the icon; sound/vibration are muted below so it still behaves quietly.
+     * The id must differ from 2.4.0's "addintimer_next": a channel's importance is immutable
+     * after creation, so reusing the old id would keep it silent and icon-less forever.
+     */
+    const val CHANNEL_STATUS = "addintimer_status"
     private const val NEXT_ID = 900001
     private val FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm (E)")
 
@@ -47,17 +54,21 @@ class AtkEngine(private val context: Context) {
         enableVibration(true)
         setSound(Settings.System.DEFAULT_ALARM_ALERT_URI, Notification.AUDIO_ATTRIBUTES_DEFAULT)
         lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        setBypassDnd(true)
       }
       notifications.createNotificationChannel(channel)
-      val quiet = NotificationChannel(
-        CHANNEL_NEXT, "下次提醒", NotificationManager.IMPORTANCE_LOW,
+      // Quiet but visible in the status bar: DEFAULT importance still renders the small icon,
+      // while no sound / no vibration / no badge keeps it from disturbing the user.
+      val status = NotificationChannel(
+        CHANNEL_STATUS, "状态栏图标", NotificationManager.IMPORTANCE_DEFAULT,
       ).apply {
-        description = "状态栏图标与最近的一次任务"
+        description = "任务栏常驻图标与最近的一次任务"
         setSound(null, null)
         enableVibration(false)
+        setShowBadge(false)
         lockscreenVisibility = Notification.VISIBILITY_PUBLIC
       }
-      notifications.createNotificationChannel(quiet)
+      notifications.createNotificationChannel(status)
     }
   }
 
@@ -194,59 +205,91 @@ class AtkEngine(private val context: Context) {
     try { showNextNotification(items) } catch (e: Exception) { }
   }
 
+  private fun alarmActivityIntent(id: Long, code: Int): PendingIntent = PendingIntent.getActivity(
+    context, code,
+    Intent(context, AtkAlarmActivity::class.java).apply {
+      flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+      putExtra(EXTRA_ID, id)
+    },
+    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+  )
+
+  private fun alarmBody(item: AtkItem): String = buildString {
+    append(item.rule.describe())
+    append(" · ")
+    append(String.format("%02d:%02d", item.hour, item.minute))
+    if (item.message.isNotBlank()) append('\n').append(item.message)
+  }
+
   /**
-   * Post the "current alarm task" notification. Its small icon is the left-most alarm icon in
-   * the status bar; the persistent next-task notification supplies the one next to it.
-   * @param fullScreen when false the caller opens 任务执行界面 itself (测试执行), avoiding a
-   *                   duplicate activity launch from the full-screen intent.
+   * The real firing notification: HIGH importance + full-screen intent, which is the only
+   * officially supported way to bring a surface up over the lock screen. Also reused as the
+   * foreground-service notification so the sound keeps playing while the screen is locked.
    */
-  fun showNotification(item: AtkItem, fullScreen: Boolean = true) {
+  fun buildAlarmNotification(item: AtkItem): Notification {
     ensureChannel()
-    val title = item.name.ifBlank { "定时提醒" }
-    val body = buildString {
-      append(item.rule.describe())
-      append(" · ")
-      append(String.format("%02d:%02d", item.hour, item.minute))
-      if (item.message.isNotBlank()) append('\n').append(item.message)
-    }
-    val full = PendingIntent.getActivity(
-      context, (item.id * 7 + 3).toInt(),
-      Intent(context, AtkAlarmActivity::class.java).apply {
-        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        putExtra(EXTRA_ID, item.id)
-      },
-      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-    )
+    val full = alarmActivityIntent(item.id, (item.id * 7 + 3).toInt())
     val snooze = actionIntent(ACTION_SNOOZE, item.id, (item.id * 7 + 4).toInt())
     val stop = actionIntent(ACTION_STOP, item.id, (item.id * 7 + 5).toInt())
-    // 测试执行 opens the face directly: use the quiet channel so a heads-up card never covers
-    // the full-screen surface. A real firing keeps the HIGH channel + full-screen intent.
-    val channelId = if (fullScreen) CHANNEL else CHANNEL_NEXT
     val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      Notification.Builder(context, channelId)
+      Notification.Builder(context, CHANNEL)
     } else {
       @Suppress("DEPRECATION") Notification.Builder(context)
     }
-    val n = builder
+    return builder
       .setSmallIcon(R.drawable.ic_atk_stat)
-      .setContentTitle(title)
-      .setContentText(body)
-      .setStyle(Notification.BigTextStyle().bigText(body))
-      .setPriority(if (fullScreen) Notification.PRIORITY_MAX else Notification.PRIORITY_LOW)
+      .setContentTitle(item.name.ifBlank { "定时提醒" })
+      .setContentText(alarmBody(item))
+      .setStyle(Notification.BigTextStyle().bigText(alarmBody(item)))
+      .setPriority(Notification.PRIORITY_MAX)
       .setCategory(Notification.CATEGORY_ALARM)
+      .setVisibility(Notification.VISIBILITY_PUBLIC)
       .setAutoCancel(false)
       .setOngoing(true)
       .setContentIntent(full)
-      .apply {
-        if (fullScreen) {
-          setFullScreenIntent(full, true)
-          setSound(Settings.System.DEFAULT_ALARM_ALERT_URI, Notification.AUDIO_ATTRIBUTES_DEFAULT)
-          setVibrate(longArrayOf(0, 400, 300, 400))
-        }
-      }
+      .setFullScreenIntent(full, true)
+      .setSound(Settings.System.DEFAULT_ALARM_ALERT_URI, Notification.AUDIO_ATTRIBUTES_DEFAULT)
+      .setVibrate(longArrayOf(0, 400, 300, 400))
       .addAction(R.drawable.ic_atk_stat, "贪睡 10 分钟", snooze)
       .addAction(R.drawable.ic_atk_stat, "终止提醒", stop)
       .build()
+  }
+
+  /**
+   * Post the notification for [item].
+   * @param fullScreen true for a real firing (HIGH + full-screen intent). 测试执行 passes false:
+   *                   the caller opens 任务执行界面 itself, so this uses the quiet status-bar
+   *                   channel — DEFAULT importance so the alarm icon appears next to the
+   *                   persistent icon, but silent and without a heads-up card.
+   */
+  fun showNotification(item: AtkItem, fullScreen: Boolean = true) {
+    val n = if (fullScreen) {
+      buildAlarmNotification(item)
+    } else {
+      ensureChannel()
+      val open = alarmActivityIntent(item.id, (item.id * 7 + 3).toInt())
+      val stop = actionIntent(ACTION_STOP, item.id, (item.id * 7 + 5).toInt())
+      val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        Notification.Builder(context, CHANNEL_STATUS)
+      } else {
+        @Suppress("DEPRECATION") Notification.Builder(context)
+      }
+      builder
+        .setSmallIcon(R.drawable.ic_atk_stat)
+        .setContentTitle(item.name.ifBlank { "定时提醒" })
+        .setContentText(alarmBody(item))
+        .setStyle(Notification.BigTextStyle().bigText(alarmBody(item)))
+        .setPriority(Notification.PRIORITY_DEFAULT)
+        .setCategory(Notification.CATEGORY_ALARM)
+        .setVisibility(Notification.VISIBILITY_PUBLIC)
+        .setAutoCancel(false)
+        .setOngoing(true)
+        .setOnlyAlertOnce(true)
+        .setSilent(true)
+        .setContentIntent(open)
+        .addAction(R.drawable.ic_atk_stat, "终止提醒", stop)
+        .build()
+    }
     try {
       notifications.notify(item.id.toInt(), n)
     } catch (e: SecurityException) {
@@ -256,8 +299,8 @@ class AtkEngine(private val context: Context) {
 
   /**
    * The original app keeps a small status-bar icon and a persistent notification showing the
-   * most recent (i.e. next) task, e.g. 「早起床 - [明天 06:30]」. Silent low-priority channel
-   * so it never competes with the actual alarm notification.
+   * most recent (i.e. next) task, e.g. 「早起床 - [明天 06:30]」. Uses the status channel so the
+   * icon is actually drawn, but stays silent and badge-free.
    */
   fun showNextNotification(items: List<AtkItem>) {
     val iconPref = try {
@@ -270,17 +313,7 @@ class AtkEngine(private val context: Context) {
       try { notifications.cancel(NEXT_ID) } catch (e: Exception) { }
       return
     }
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      val channel = NotificationChannel(
-        CHANNEL_NEXT, "下次提醒", NotificationManager.IMPORTANCE_LOW,
-      ).apply {
-        description = "显示最近的一次定时任务"
-        setSound(null, null)
-        enableVibration(false)
-        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-      }
-      notifications.createNotificationChannel(channel)
-    }
+    ensureChannel()
     val now = System.currentTimeMillis()
     var best: AtkItem? = null
     var bestAt = Long.MAX_VALUE
@@ -322,7 +355,7 @@ class AtkEngine(private val context: Context) {
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
     val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      Notification.Builder(context, CHANNEL_NEXT)
+      Notification.Builder(context, CHANNEL_STATUS)
     } else {
       @Suppress("DEPRECATION") Notification.Builder(context)
     }
@@ -334,7 +367,8 @@ class AtkEngine(private val context: Context) {
       .setAutoCancel(false)
       .setOngoing(true)
       .setOnlyAlertOnce(true)
-      .setPriority(Notification.PRIORITY_LOW)
+      .setSilent(true)
+      .setPriority(Notification.PRIORITY_DEFAULT)
       .setCategory(Notification.CATEGORY_REMINDER)
       .build()
     try { notifications.notify(NEXT_ID, n) } catch (e: SecurityException) { }
@@ -353,6 +387,9 @@ class AtkEngine(private val context: Context) {
     out.add("忽略电池优化" to pm.isIgnoringBatteryOptimizations(context.packageName))
     if (Build.VERSION.SDK_INT >= 34) {
       out.add("全屏通知" to notifications.canUseFullScreenIntent())
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+      out.add("悬浮窗（后台弹出界面）" to Settings.canDrawOverlays(context))
     }
     return out
   }
@@ -386,6 +423,17 @@ class AtkEngine(private val context: Context) {
   fun openFullScreenSettings() {
     if (Build.VERSION.SDK_INT >= 34) {
       val i = Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
+        data = Uri.parse("package:" + context.packageName)
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+      }
+      try { context.startActivity(i) } catch (e: Exception) { openAppDetails() }
+    }
+  }
+
+  /** ROMs that ignore full-screen intents still let an app with this permission pop up. */
+  fun openOverlaySettings() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+      val i = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).apply {
         data = Uri.parse("package:" + context.packageName)
         flags = Intent.FLAG_ACTIVITY_NEW_TASK
       }
