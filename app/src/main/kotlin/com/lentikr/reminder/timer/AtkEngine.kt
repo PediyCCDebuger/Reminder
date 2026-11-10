@@ -223,7 +223,37 @@ class AtkEngine(private val context: Context) {
     }
   }
 
-  fun cancel(id: Long) = alarms.cancel(fireIntent(id))
+  fun cancel(id: Long) {
+    runCatching { alarms.cancel(fireIntent(id)) }
+    runCatching { alarms.cancel(legacyFireIntent(id)) }
+  }
+
+  /**
+   * Arm the real firing path 60 seconds from now, for the 60 秒后真实触发 menu entry.
+   *
+   * 测试执行 opens 执行界面 directly and therefore never exercises the alarm → foreground
+   * service → ring chain; the only other way to check that chain is to wait for the configured
+   * time. This uses a separate request code so the task's normal schedule is left untouched.
+   */
+  fun fireTestSoon(id: Long) {
+    val i = Intent(context, AtkAlarmService::class.java).apply {
+      action = AtkAlarmService.ACTION_START
+      putExtra(AtkAlarmService.EXTRA_ACTION, AtkAlarmService.ACTION_START)
+      putExtra(EXTRA_ID, id)
+    }
+    val pi = PendingIntent.getForegroundService(
+      context, (id * 7 + 7).toInt(), i,
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+    val at = System.currentTimeMillis() + 60_000L
+    AtkDiag.log(context, "排程: 60 秒后真实触发测试 id=$id")
+    try {
+      alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+    } catch (e: SecurityException) {
+      AtkDiag.log(context, "排程: 测试触发无法用精确闹钟，改用 set()")
+      alarms.set(AlarmManager.RTC_WAKEUP, at, pi)
+    }
+  }
 
   /**
    * Original 测试执行 behaviour: open the full 任务执行界面 immediately, no intermediate

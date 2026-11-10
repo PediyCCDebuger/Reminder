@@ -63,6 +63,7 @@ private enum class Screen { LIST, EDIT, SETTINGS, TAGS, PERMISSIONS }
 private val TAB_NAMES = listOf("常用", "生活", "纪念日", "生日")
 private val CONTEXT_ENTRIES = listOf(
   "测试执行", "删除条目", "参考新建", "执行规划", "查看日志", "移动分类", "多选模式",
+  "60 秒后真实触发",
 )
 private val PLAN_FMT = DateTimeFormatter.ofPattern("yyyy/MM/dd (E) HH:mm")
 
@@ -338,6 +339,13 @@ fun TimerApp() {
             6 -> {
               selectionMode = true
               selectedIds = setOf(item.id)
+            }
+            7 -> {
+              // End-to-end check of the real firing path (alarm → foreground service → ring →
+              // 执行界面) without waiting for the configured time: arm it 60 s out and lock the
+              // screen. Uses its own request code so the task's normal schedule is untouched.
+              engine.fireTestSoon(item.id)
+              toast(context, "60 秒后按真实闹钟流程触发「${item.name}」，现在可以锁屏等待")
             }
           }
         },
