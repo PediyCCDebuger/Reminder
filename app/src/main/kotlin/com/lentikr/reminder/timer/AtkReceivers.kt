@@ -142,6 +142,9 @@ class AtkReceiver : BroadcastReceiver() {
         val item = if (id >= 0) store.get(id) else null
         if (item != null && item.enabled) {
           engine.ensureChannel()
+          // Post the HIGH + full-screen notification first: it is the primary path that lets
+          // Android bring the surface up over the keyguard, independent of the service start.
+          engine.showNotification(item)
           startAlarmService(context, engine, id)
           store.log(id, 1, item.name)
           engine.schedule(item)
@@ -152,6 +155,7 @@ class AtkReceiver : BroadcastReceiver() {
       "app.lentikr.reminder.ATK_SNOOZE_FIRE" -> {
         val item = if (id >= 0) store.get(id) else null
         if (item != null && item.enabled) {
+          engine.showNotification(item)
           startAlarmService(context, engine, id)
           store.log(id, 2, item.name + " 贪睡")
         }
