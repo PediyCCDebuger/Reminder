@@ -137,6 +137,18 @@ object AtkAlarmSound {
     }
 
     startVibration(app, item)
+    // Safety net: never let a tone ring forever. If the ringing activity and the foreground
+    // service are both gone but the process survives (e.g. the ROM killed the surface without
+    // stopping the singleton player), force-stop after 10 minutes.
+    try {
+      Handler(Looper.getMainLooper()).postDelayed({
+        if (active && currentId == itemId) {
+          AtkDiag.log(app, "音: 到达 10 分钟上限，自动停止")
+          stop()
+        }
+      }, 10 * 60 * 1000L)
+    } catch (e: Exception) {
+    }
     // Activate the media session AFTER the player is up so the mediaPlayback foreground service
     // is genuinely playing media when startForeground claims that type.
     activateSession(app)
@@ -403,11 +415,20 @@ class AtkReceiver : BroadcastReceiver() {
   }
 }
 
-/** Full-screen alarm surface shown by the high-priority notification and 测试执行. */
+/**
+ * Full-screen alarm surface — the **direct** fire entry from `setAlarmClock()` (and 测试执行 /
+ * 60 秒后真实触发). It is launched straight from the alarm manager, whose background-activity
+ * exemption lets it come up over the keyguard and turn the screen on even with the app killed.
+ * It plays the tone itself and starts the foreground service purely for the persistent
+ * notification + re-arm; dismissing this surface therefore does not silence an alarm that the
+ * service is still honouring (matches how the system clock behaves when you swipe its surface).
+ */
 class AtkAlarmActivity : ComponentActivity() {
 
   /** Held as state so a second alarm (onNewIntent) refreshes the visible task in place. */
   private val faceId = androidx.compose.runtime.mutableStateOf(-1L)
+  private val faceForce = androidx.compose.runtime.mutableStateOf(false)
+  private var wakeLock: PowerManager.WakeLock? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -427,10 +448,37 @@ class AtkAlarmActivity : ComponentActivity() {
     // statusBarsPadding()/navigationBarsPadding() work on every ROM and API level.
     androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
     // Theme.Reminder.Alarm already sets black system bars with light icons.
+
     faceId.value = intent.getLongExtra(AtkEngine.EXTRA_ID, -1L)
+    faceForce.value = intent.getBooleanExtra(AtkEngine.EXTRA_FORCE, false)
+    AtkDiag.log(this, "执行界面: 打开 id=${faceId.value} force=${faceForce.value}")
+
+    val item = loadItem(faceId.value)
+    if (item == null) {
+      AtkDiag.log(this, "执行界面: 任务获取失败 id=${faceId.value}")
+      finish()
+      return
+    }
+    if (!item.enabled && !faceForce.value) {
+      AtkDiag.log(this, "执行界面: 任务已停用，不响 id=${faceId.value}（base[10]=${item.base.getOrNull(10) ?: "?"}）")
+      finish()
+      return
+    }
+
+    acquireWakeLock()
+    // Play the tone immediately, straight from this (foreground, lock-screen) activity. The tone
+    // is a process-wide singleton, so it keeps ringing even if this surface is dismissed while the
+    // foreground service — and its notification — are still up.
+    AtkAlarmSound.play(this, item)
+    // Start the foreground service for the persistent notification + re-arm. Because it is started
+    // FROM a visible activity, the ROM treats it as foreground-started and does not tear it down
+    // the way a cold background FGS start gets killed (the original cause of "锁屏听不到闹钟").
+    startAlarmService(item.id, faceForce.value)
     val engine = AtkEngine(this)
-    AtkDiag.log(this, "执行界面: 打开 id=${faceId.value}")
-    AtkAlarmSound.play(this, loadItem(faceId.value))
+    runCatching { AtkStore(this).log(item.id, 1, item.name) }
+    runCatching { engine.schedule(item) }
+    runCatching { engine.refreshNext() }
+
     // Back also terminates the current alarm, exactly like the 终止 button.
     onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
       override fun handleOnBackPressed() {
@@ -442,10 +490,10 @@ class AtkAlarmActivity : ComponentActivity() {
     })
     setContent {
       val id by faceId
-      val item = remember(id) { loadItem(id) }
+      val fitem = remember(id) { loadItem(id) }
       AtkTheme {
         AlarmFace(
-          item = item,
+          item = fitem,
           // 静音 only silences the tone; the 执行界面 stays up so 贪睡 / 终止 are still reachable.
           // The foreground service is stopped with it, otherwise cancelling its notification
           // from here would leave a "foreground without notification" service behind.
@@ -474,18 +522,75 @@ class AtkAlarmActivity : ComponentActivity() {
     }
   }
 
-  private fun loadItem(id: Long): AtkItem? =
-    if (id >= 0) runCatching { AtkStore(this).get(id) }.getOrNull() else null
+  private fun startAlarmService(id: Long, force: Boolean) {
+    val svc = Intent(this, AtkAlarmService::class.java).apply {
+      putExtra(AtkAlarmService.EXTRA_ACTION, AtkAlarmService.ACTION_START)
+      putExtra(AtkEngine.EXTRA_ID, id)
+      putExtra(AtkAlarmService.EXTRA_FORCE, force)
+    }
+    try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(svc) else startService(svc)
+      AtkDiag.log(this, "执行界面: 前台服务启动请求已发出 id=$id")
+    } catch (e: Exception) {
+      AtkDiag.log(this, "执行界面: 前台服务启动被拒 ${e.javaClass.simpleName}: ${e.message}")
+    }
+  }
+
+  /** Read the firing task, retrying a few times to survive a cold-start SQLite hiccup. */
+  private fun loadItem(id: Long): AtkItem? {
+    if (id < 0) return null
+    var lastErr: String? = null
+    for (attempt in 0 until 3) {
+      try {
+        val item = AtkStore(applicationContext).get(id)
+        if (item != null) return item
+        lastErr = "数据库无此 id"
+      } catch (e: Exception) {
+        lastErr = "${e.javaClass.simpleName}: ${e.message}"
+      }
+      if (attempt < 2) {
+        try {
+          Thread.sleep(150)
+        } catch (e: InterruptedException) {
+          Thread.currentThread().interrupt()
+        }
+      }
+    }
+    return null
+  }
+
+  private fun acquireWakeLock() {
+    if (wakeLock != null) return
+    try {
+      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+      wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AddinTimer:alarm_face")
+        .apply { setReferenceCounted(false); acquire(20 * 60 * 1000L) }
+    } catch (e: Exception) {
+      wakeLock = null
+    }
+  }
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     setIntent(intent)
-    faceId.value = intent.getLongExtra(AtkEngine.EXTRA_ID, -1L)
-    AtkAlarmSound.play(this, loadItem(faceId.value))
+    val newId = intent.getLongExtra(AtkEngine.EXTRA_ID, -1L)
+    faceId.value = newId
+    faceForce.value = intent.getBooleanExtra(AtkEngine.EXTRA_FORCE, false)
+    AtkDiag.log(this, "执行界面: onNewIntent id=$newId")
+    val item = loadItem(newId) ?: return
+    AtkAlarmSound.play(this, item)
+    startAlarmService(newId, faceForce.value)
   }
 
   override fun onDestroy() {
-    AtkAlarmSound.stop()
+    // Do NOT stop the tone here: the foreground service (and this surface's singleton player) may
+    // legitimately keep ringing after the activity is dismissed. The explicit 终止 / 静音 / 贪睡
+    // buttons stop it. A 10-minute hard cap in AtkAlarmSound bounds the worst case.
+    try {
+      if (wakeLock?.isHeld == true) wakeLock?.release()
+    } catch (e: Exception) {
+    }
+    wakeLock = null
     super.onDestroy()
   }
 }

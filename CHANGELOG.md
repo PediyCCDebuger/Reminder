@@ -2,6 +2,17 @@
 
 每个 Release 的说明都取自本文件对应版本的小节，由打包工作流自动写入 GitHub Release。
 
+## [2.9.0] - 2026-11-10
+
+### 修复（真机反馈）
+- **退到后台 / 锁屏后闹钟仍然不响，只有解锁点通知才响**：根因确认——`setAlarmClock` 的 `PendingIntent` 之前指向「前台服务」，前台服务在后台用 `startActivity` 拉起执行界面，被 Android 10+ 的后台启动 Activity 限制拦下（日志里 `svc: onDestroy（前台=true，仍持唤醒锁=true）` 就是被系统 / OEM 强杀的痕迹）。逆向对照能正常锁屏响铃的 Smart Alarm 后确认：它的闹钟 `PendingIntent` 直接指向 `getActivity`，并依赖 `setAlarmClock` 自带的「后台启动 Activity 豁免」。本次改为：`setAlarmClock` / `setExactAndAllowWhileIdle` 的 `PendingIntent` 直接指向 `AtkAlarmActivity`，由系统把执行界面带出锁屏并点亮屏幕（即使 App 被彻底杀掉）；执行界面自己负责播铃 + 启动前台服务（用于常驻通知与重排），前台服务不再回头拉起界面，杜绝循环。「60 秒后真实触发」同样改为直达 Activity。
+
+### 新增
+- **多选批量删除**：多选模式下，除「移动分类 (N)」外新增「删除 (N)」，勾选后即可批量删除当前分类下的任务；删除前弹出确认。单条与批量删除均只移除任务，不改变其它数据。
+
+### 变更
+- 签名密钥迁入 GitHub Secrets（构建流程不变，覆盖安装签名保持一致）。
+
 ## [2.8.0] - 2026-11-10
 
 ### 修复（真机反馈）

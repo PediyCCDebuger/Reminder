@@ -94,6 +94,7 @@ fun TimerApp() {
     var selectionMode by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf(emptySet<Long>()) }
     var batchMoveOpen by remember { mutableStateOf(false) }
+    var batchDeleteOpen by remember { mutableStateOf(false) }
 
     fun refresh() {
       timerList = try { store.all() } catch (e: Exception) { emptyList() }
@@ -188,6 +189,7 @@ fun TimerApp() {
             selectedIds = if (selectedIds.containsAll(visible)) emptySet() else visible.toSet()
           },
           onBatchMove = { batchMoveOpen = true },
+          onBatchDelete = { batchDeleteOpen = true },
         )
 
         Screen.EDIT -> AtkEditScreen(
@@ -431,6 +433,32 @@ fun TimerApp() {
       )
     }
 
+    if (batchDeleteOpen) {
+      AtkMessageDialog(
+        title = "批量删除",
+        body = "确定删除选中的 ${selectedIds.size} 条任务？此操作不可撤销。",
+        confirmText = "删除",
+        dismissText = "取消",
+        onDismiss = { batchDeleteOpen = false },
+        onConfirm = {
+          val n = try {
+            var c = 0
+            for (id in selectedIds) {
+              engine.cancel(id)
+              store.delete(id)
+              c++
+            }
+            c
+          } catch (e: Exception) { 0 }
+          batchDeleteOpen = false
+          selectionMode = false
+          selectedIds = emptySet()
+          refresh()
+          toast(context, "已删除 $n 条任务")
+        },
+      )
+    }
+
     if (aboutOpen) {
       val crash = AtkCrash.last(context)
       AtkMessageDialog(
@@ -440,7 +468,7 @@ fun TimerApp() {
           "导入时逐字节保留激活状态与分类，不自动启用任何任务。\n" +
           "已去除原版未注册版的激活数量上限，任意多条提醒可同时启用。\n" +
           "首次启动载入 18 条原版示例任务（默认全部未激活）；参数设置以原版截图为准。\n" +
-          "标题栏「多选」可勾选多条任务批量移动分类。\n" +
+          "标题栏「多选」可勾选多条任务，批量移动分类或批量删除。\n" +
           "Android 12+ 请在「系统设置 → 服务状态」完成精确闹钟、通知、电池优化与全屏通知授权。" +
           (if (crash.isNotBlank()) "\n\n最近一次崩溃日志：\n$crash" else ""),
         onDismiss = { aboutOpen = false },
@@ -471,6 +499,7 @@ private fun MainScreen(
   onSelectMode: (Boolean) -> Unit,
   onSelectAll: () -> Unit,
   onBatchMove: () -> Unit,
+  onBatchDelete: () -> Unit,
 ) {
   Column(Modifier.fillMaxSize()) {
     AtkTitleBar(
@@ -525,6 +554,12 @@ private fun MainScreen(
           "移动分类 (${selectedIds.size})",
           Modifier.weight(2f),
           onBatchMove,
+          enabled = selectedIds.isNotEmpty(),
+        )
+        SelectionButton(
+          "删除 (${selectedIds.size})",
+          Modifier.weight(2f),
+          onBatchDelete,
           enabled = selectedIds.isNotEmpty(),
         )
         SelectionButton("取消", Modifier.weight(1f), onClick = { onSelectMode(false) })

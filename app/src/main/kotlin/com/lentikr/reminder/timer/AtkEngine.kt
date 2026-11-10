@@ -31,6 +31,8 @@ class AtkEngine(private val context: Context) {
     const val ACTION_BOOT = "app.lentikr.reminder.ATK_BOOT"
     const val EXTRA_ID = "timerid"
     const val EXTRA_AT = "triggerAt"
+    /** Set by 60 秒后真实触发 so the fired 执行界面 forces the ring chain on a disabled task. */
+    const val EXTRA_FORCE = "force"
     const val CHANNEL = "addintimer_alarm"
     /**
      * The real firing notification. IMPORTANCE_HIGH + full-screen intent is the only supported way
@@ -96,18 +98,23 @@ class AtkEngine(private val context: Context) {
   }
 
   /**
-   * The alarm PendingIntent starts [AtkAlarmService] as a foreground service, not a broadcast.
-   * Alarms fired from `setAlarmClock()` put the app on the temporary allowlist, so the service
-   * starts even when the app was cached/frozen — a plain broadcast to a frozen app can be held
-   * back by aggressive ROMs, which then looks like "到点不响，解锁后才响".
+   * The alarm PendingIntent launches [AtkAlarmActivity] *directly*, not a foreground service.
+   *
+   * This is the single most important fix for "锁屏 / 退到后台就听不到闹钟": `setAlarmClock()`
+   * grants an explicit background-activity-launch exemption (it is the API designed for alarm
+   * clocks), so the ringing 执行界面 comes up over the keyguard and turns the screen on even when
+   * the app is fully killed. The previous design pointed this PendingIntent at a foreground
+   * service, which then tried to `startActivity` from a background context — Android 10+ blocks
+   * that, so the surface only appeared after the user unlocked and tapped the notification.
+   *
+   * The activity itself starts the foreground service for the persistent notification + re-arm.
    */
   private fun fireIntent(id: Long): PendingIntent {
-    val i = Intent(context, AtkAlarmService::class.java).apply {
-      action = AtkAlarmService.ACTION_START
-      putExtra(AtkAlarmService.EXTRA_ACTION, AtkAlarmService.ACTION_START)
+    val i = Intent(context, AtkAlarmActivity::class.java).apply {
+      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
       putExtra(EXTRA_ID, id)
     }
-    return PendingIntent.getForegroundService(
+    return PendingIntent.getActivity(
       context, (id * 7 + 1).toInt(), i,
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
@@ -198,11 +205,7 @@ class AtkEngine(private val context: Context) {
       alarms.cancel(pi)
       return
     }
-    val show = PendingIntent.getActivity(
-      context, (item.id * 7 + 2).toInt(),
-      Intent(context, com.lentikr.reminder.MainActivity::class.java).putExtra(EXTRA_ID, item.id),
-      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-    )
+    val show = alarmActivityIntent(item.id, (item.id * 7 + 2).toInt())
     val info = AlarmManager.AlarmClockInfo(ms, show)
     try {
       alarms.setAlarmClock(info, pi)
@@ -236,15 +239,17 @@ class AtkEngine(private val context: Context) {
    * time. This uses a separate request code so the task's normal schedule is left untouched.
    */
   fun fireTestSoon(id: Long) {
-    val i = Intent(context, AtkAlarmService::class.java).apply {
-      action = AtkAlarmService.ACTION_START
-      putExtra(AtkAlarmService.EXTRA_ACTION, AtkAlarmService.ACTION_START)
+    // Launch the ringing 执行界面 directly (same setAlarmClock exemption as the real alarm) so it
+    // comes up over the lock screen even with the app killed — this is exactly the path the user
+    // needs to verify, and the previous foreground-service indirection defeated it.
+    val i = Intent(context, AtkAlarmActivity::class.java).apply {
+      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
       putExtra(EXTRA_ID, id)
       // Force the ring chain even if the task is disabled, so the 60s test verifies 响铃 / 渐响 /
       // 执行界面 without first having to enable the task (测试执行 already ignores enabled).
-      putExtra(AtkAlarmService.EXTRA_FORCE, true)
+      putExtra(EXTRA_FORCE, true)
     }
-    val pi = PendingIntent.getForegroundService(
+    val pi = PendingIntent.getActivity(
       context, (id * 7 + 7).toInt(), i,
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )

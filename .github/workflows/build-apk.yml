@@ -1,14 +1,15 @@
 name: Build APK
 
+# Manual-only helper that builds the signed release APKs and uploads them as workflow
+# artifacts. It does NOT publish a GitHub release — that is owned exclusively by
+# release.yml (triggered by a `repository_dispatch` of type `build-release`, or a `v*`
+# tag push). Keeping release publishing in one workflow avoids two builds racing to
+# create the same tag/release and avoids publishing a release on every commit to main.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
-  repository_dispatch:
-    types: [build-release]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -21,18 +22,6 @@ jobs:
         run: |
           version=$(sed -nE 's/^\s*versionName = "(.*)"/\1/p' app/build.gradle.kts)
           echo "VERSION=$version" >> "$GITHUB_ENV"
-          echo "TAG=v$version" >> "$GITHUB_ENV"
-
-      - name: Compose release notes from CHANGELOG
-        run: |
-          python3 - <<'PY' > "$RUNNER_TEMP/notes.md"
-          import os, re
-          v = os.environ["VERSION"]
-          text = open("CHANGELOG.md", encoding="utf-8").read()
-          m = re.search(r"^## \[" + re.escape(v) + r"\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.M | re.S)
-          print(m.group(0).strip() if m else "版本 " + v)
-          PY
-          cat "$RUNNER_TEMP/notes.md"
 
       - uses: actions/setup-java@v6
         with:
@@ -41,9 +30,7 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
 
-      # A fixed, PUBLIC debug signing key is checked in so every release keeps the same
-      # signature and can be installed over the previous one. Never put a private production
-      # key in a public repository; repository secrets take precedence when configured.
+      # Fixed public debug key: see release.yml. Secrets take precedence when configured.
       - name: Restore or create signing key
         id: signing
         env:
@@ -73,33 +60,12 @@ jobs:
           REMINDER_KEY_PASSWORD: ${{ steps.signing.outputs.password }}
         run: ./gradlew assembleRelease
 
-      - name: Verify signatures
-        run: |
-          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner"
-          for apk in app/build/outputs/apk/release/*.apk; do
-            echo "$apk"
-            "$apksigner" verify --print-certs "$apk" | grep "SHA-256" | head -1
-          done
-
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          out=app/build/outputs/apk/release
-          dist="$RUNNER_TEMP/dist"
-          mkdir -p "$dist"
-          cp "$out/app-arm64-v8a-release.apk"   "$dist/AddinTimerRevive-$VERSION-arm64-v8a.apk"
-          cp "$out/app-armeabi-v7a-release.apk" "$dist/AddinTimerRevive-$VERSION-armeabi-v7a.apk"
-          cp "$out/app-universal-release.apk"   "$dist/AddinTimerRevive-$VERSION-universal.apk"
-          (cd "$dist" && sha256sum *.apk > SHA256SUMS)
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$dist"/* --clobber
-            gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
-          else
-            gh release create "$TAG" "$dist"/* \
-              --title "Reminder $VERSION · AddinTimer 复刻版" \
-              --notes-file "$RUNNER_TEMP/notes.md"
-          fi
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: AddinTimerRevive-${{ env.VERSION }}-apks
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
 
       - name: Remove signing key
         if: always()

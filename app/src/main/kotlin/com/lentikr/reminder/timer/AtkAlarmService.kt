@@ -84,26 +84,26 @@ class AtkAlarmService : Service() {
     acquireWakeLock()
     engine.ensureChannel()
 
-    // Play the tone FIRST so the mediaPlayback foreground service is genuinely playing media by
-    // the time startForeground() claims that type. Android 14+ tears down a mediaPlayback FGS that
-    // has no active media session within ~1s, which is exactly why the alarm went silent the
-    // moment the app was backgrounded. The receiver may already have started this exact tone;
-    // play() is a no-op in that case.
+    // Play the tone (idempotent: the activity that launched this service already started it, so
+    // this is normally a no-op). Keeping the tone in one process-wide singleton means it survives
+    // either component being torn down.
     AtkAlarmSound.play(this, item)
 
     val foregrounded = enterForeground(engine, item, id.toInt())
     if (!foregrounded) {
-      // Being killed at the 5 s mark would cut the tone, so stop being a "started" service and
-      // let the audio session (and the 执行界面) keep the process alive instead.
-      AtkDiag.log(this, "svc: 无法进入前台，改为在本进程播铃")
+      // Could not enter the foreground as a mediaPlayback service (rare). The tone is already
+      // playing from the activity and a plain notification is posted below, so the alarm still
+      // works — we just skip the "foreground" guarantees.
+      AtkDiag.log(this, "svc: 无法进入前台，改为普通通知 + 本进程播铃")
     }
 
+    // Post (or replace) the persistent alarm notification and re-arm the next occurrence. The
+    // 执行界面 is launched directly by setAlarmClock(), so this service must NOT start it again
+    // (doing so would loop through onNewIntent).
     engine.showNotification(item)
     runCatching { AtkStore(this).log(id, 1, item.name) }
     runCatching { engine.schedule(item) }
     runCatching { engine.refreshNext() }
-    engine.launchAlarmFace(id)
-    if (!foregrounded) stopSelf(startId)
     return START_NOT_STICKY
   }
 
