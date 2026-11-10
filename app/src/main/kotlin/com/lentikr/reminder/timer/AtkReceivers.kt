@@ -5,31 +5,42 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.Ringtone
+import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
+import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -46,6 +57,60 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+
+/**
+ * The alarm sound belongs to the 任务执行界面 itself, not to the notification channel: some
+ * ROMs silently downgrade notification importance, and then the timer would fire with no sound.
+ * A single shared player lets the notification actions (终止 / 贪睡) stop it from the receiver.
+ */
+object AtkAlarmSound {
+  private var ringtone: Ringtone? = null
+  private var vibrator: Vibrator? = null
+
+  fun play(context: Context) {
+    stop()
+    try {
+      val uri = RingtoneManager.getActualDefaultRingtoneUri(context, RingtoneManager.TYPE_ALARM)
+        ?: Settings.System.DEFAULT_ALARM_ALERT_URI
+      val r = RingtoneManager.getRingtone(context, uri)
+      if (r != null) {
+        r.audioAttributes = AudioAttributes.Builder()
+          .setUsage(AudioAttributes.USAGE_ALARM)
+          .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+          .build()
+        r.play()
+        ringtone = r
+      }
+    } catch (e: Exception) {
+      // No alarm tone configured on this device: vibration below still works.
+    }
+    try {
+      val vib: Vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
+      } else {
+        @Suppress("DEPRECATION")
+        context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+      }
+      if (vib.hasVibrator()) {
+        val pattern = longArrayOf(0, 500, 400, 500)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+          vib.vibrate(VibrationEffect.createWaveform(pattern, 0))
+        } else {
+          @Suppress("DEPRECATION") vib.vibrate(pattern, 0)
+        }
+        vibrator = vib
+      }
+    } catch (e: Exception) {
+    }
+  }
+
+  fun stop() {
+    try { ringtone?.stop() } catch (e: Exception) { }
+    ringtone = null
+    try { vibrator?.cancel() } catch (e: Exception) { }
+    vibrator = null
+  }
+}
 
 class AtkReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
@@ -67,6 +132,9 @@ class AtkReceiver : BroadcastReceiver() {
         if (item != null && item.enabled) {
           engine.ensureChannel()
           engine.showNotification(item)
+          // Full-screen intent is the primary path on a locked screen; the explicit launch is
+          // a fallback for ROMs that downgrade the notification (singleTop avoids duplicates).
+          engine.launchAlarmFace(id)
           store.log(id, 1, item.name)
           engine.schedule(item)
           engine.refreshNext()
@@ -77,11 +145,13 @@ class AtkReceiver : BroadcastReceiver() {
         val item = if (id >= 0) store.get(id) else null
         if (item != null && item.enabled) {
           engine.showNotification(item)
+          engine.launchAlarmFace(id)
           store.log(id, 2, item.name + " 贪睡")
         }
       }
 
       AtkEngine.ACTION_SNOOZE -> {
+        AtkAlarmSound.stop()
         engine.dismiss(id)
         val alarms = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val pi = PendingIntent.getBroadcast(
@@ -100,13 +170,20 @@ class AtkReceiver : BroadcastReceiver() {
         }
       }
 
-      AtkEngine.ACTION_STOP -> engine.dismiss(id)
+      AtkEngine.ACTION_STOP -> {
+        AtkAlarmSound.stop()
+        engine.dismiss(id)
+      }
     }
   }
 }
 
-/** Full-screen alarm surface shown by the high-priority notification. */
+/** Full-screen alarm surface shown by the high-priority notification and 测试执行. */
 class AtkAlarmActivity : ComponentActivity() {
+
+  /** Held as state so a second alarm (onNewIntent) refreshes the visible task in place. */
+  private val faceId = androidx.compose.runtime.mutableStateOf(-1L)
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
@@ -121,15 +198,32 @@ class AtkAlarmActivity : ComponentActivity() {
       )
     }
     window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-    val id = intent.getLongExtra(AtkEngine.EXTRA_ID, -1L)
-    val item = if (id >= 0) AtkStore(this).get(id) else null
+    // Android 15+ forces edge-to-edge. Ask for insets explicitly so Compose's
+    // statusBarsPadding()/navigationBarsPadding() work on every ROM and API level.
+    androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+    // Theme.Reminder.Alarm already sets black system bars with light icons.
+    faceId.value = intent.getLongExtra(AtkEngine.EXTRA_ID, -1L)
     val engine = AtkEngine(this)
+    AtkAlarmSound.play(this)
+    // Back also terminates the current alarm, exactly like the 终止 button.
+    onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+      override fun handleOnBackPressed() {
+        AtkAlarmSound.stop()
+        AtkEngine(this@AtkAlarmActivity).dismiss(faceId.value)
+        finish()
+      }
+    })
     setContent {
+      val id by faceId
+      val item = remember(id) {
+        if (id >= 0) AtkStore(this@AtkAlarmActivity).get(id) else null
+      }
       AtkTheme {
         AlarmFace(
           item = item,
-          onMute = { engine.dismiss(id) },
+          onMute = { AtkAlarmSound.stop(); engine.dismiss(id) },
           onSnooze = {
+            AtkAlarmSound.stop()
             sendBroadcast(Intent(this, AtkReceiver::class.java).apply {
               action = AtkEngine.ACTION_SNOOZE
               putExtra(AtkEngine.EXTRA_ID, id)
@@ -137,12 +231,25 @@ class AtkAlarmActivity : ComponentActivity() {
             finish()
           },
           onStop = {
+            AtkAlarmSound.stop()
             engine.dismiss(id)
             finish()
           },
         )
       }
     }
+  }
+
+  override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    setIntent(intent)
+    faceId.value = intent.getLongExtra(AtkEngine.EXTRA_ID, -1L)
+    AtkAlarmSound.play(this)
+  }
+
+  override fun onDestroy() {
+    AtkAlarmSound.stop()
+    super.onDestroy()
   }
 }
 
@@ -166,7 +273,15 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
     ""
   }
 
-  Box(Modifier.fillMaxSize().background(Color(0xFF171717))) {
+  // Android 15+ enforces edge-to-edge: without these paddings the title strip collides with
+  // the status bar and the bottom buttons sit underneath the 3-button navigation bar.
+  Box(
+    Modifier
+      .fillMaxSize()
+      .background(Color(0xFF171717))
+      .statusBarsPadding()
+      .navigationBarsPadding(),
+  ) {
     Canvas(Modifier.fillMaxSize()) {
       val w = size.width
       val h = size.height
@@ -222,7 +337,9 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
           color = Color.White, fontSize = 56.sp, fontWeight = FontWeight.Light,
         )
       }
-      Spacer(Modifier.height(64.dp))
+      Spacer(Modifier.height(18.dp))
+      Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF3A3A3A)))
+      Spacer(Modifier.height(48.dp))
       Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Text(
           item?.name?.ifBlank { "定时提醒" } ?: "定时提醒",
@@ -236,6 +353,7 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
         }
       }
       Spacer(Modifier.weight(1f))
+      // The original uses three equal, divider-separated icon-only buttons (no text labels).
       Row(
         Modifier
           .fillMaxWidth()
@@ -243,32 +361,35 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
           .background(Brush.verticalGradient(listOf(Color(0xFF3A3A3A), Color(0xFF1A1A1A))))
           .border(1.dp, Color(0xFF555555)),
       ) {
-        AlarmFaceButton("♪", "静音", Modifier.weight(1f), onMute)
-        AlarmFaceButton("◷", "贪睡", Modifier.weight(1f), onSnooze)
-        AlarmFaceButton("ⓘ", "终止", Modifier.weight(1f), onStop)
+        AlarmFaceButton("♪", Modifier.weight(1f), onMute)
+        AlarmFaceDivider()
+        AlarmFaceButton("◷", Modifier.weight(1f), onSnooze)
+        AlarmFaceDivider()
+        AlarmFaceButton("ⓘ", Modifier.weight(1f), onStop)
       }
     }
   }
 }
 
 @Composable
-private fun AlarmFaceButton(symbol: String, label: String, modifier: Modifier, onClick: () -> Unit) {
+private fun AlarmFaceDivider() {
+  Box(Modifier.width(1.dp).fillMaxHeight().background(Color(0xFF555555)))
+}
+
+@Composable
+private fun AlarmFaceButton(symbol: String, modifier: Modifier, onClick: () -> Unit) {
   Box(
-    modifier.fillMaxSize().clickable(onClick = onClick),
+    modifier.fillMaxHeight().clickable(onClick = onClick),
     contentAlignment = Alignment.Center,
   ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      Box(
-        Modifier
-          .size(34.dp)
-          .clip(CircleShape)
-          .border(2.dp, AtkSkin.green, CircleShape),
-        contentAlignment = Alignment.Center,
-      ) {
-        Text(symbol, color = AtkSkin.green, fontSize = 20.sp)
-      }
-      Spacer(Modifier.width(6.dp))
-      Text(label, color = Color(0xFFDDDDDD), fontSize = 14.sp)
+    Box(
+      Modifier
+        .size(38.dp)
+        .clip(CircleShape)
+        .border(2.dp, AtkSkin.green, CircleShape),
+      contentAlignment = Alignment.Center,
+    ) {
+      Text(symbol, color = AtkSkin.green, fontSize = 21.sp)
     }
   }
 }

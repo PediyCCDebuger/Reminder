@@ -49,6 +49,15 @@ class AtkEngine(private val context: Context) {
         lockscreenVisibility = Notification.VISIBILITY_PUBLIC
       }
       notifications.createNotificationChannel(channel)
+      val quiet = NotificationChannel(
+        CHANNEL_NEXT, "下次提醒", NotificationManager.IMPORTANCE_LOW,
+      ).apply {
+        description = "状态栏图标与最近的一次任务"
+        setSound(null, null)
+        enableVibration(false)
+        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+      }
+      notifications.createNotificationChannel(quiet)
     }
   }
 
@@ -139,15 +148,38 @@ class AtkEngine(private val context: Context) {
     try {
       alarms.setAlarmClock(info, pi)
     } catch (e: SecurityException) {
-      // Exact alarm permission missing: fall back to an inexact alarm so it still rings.
+      // Exact-alarm permission missing (Android 13+/14+ or some ColorOS builds). Work down
+      // the ladder so the timer still fires instead of silently doing nothing.
       try {
-        alarms.set(AlarmManager.RTC_WAKEUP, ms, pi)
-      } catch (ignored: SecurityException) {
+        alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, ms, pi)
+      } catch (e2: SecurityException) {
+        try {
+          alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, ms, pi)
+        } catch (ignored: SecurityException) {
+        }
       }
     }
   }
 
   fun cancel(id: Long) = alarms.cancel(fireIntent(id))
+
+  /**
+   * Original 测试执行 behaviour: open the full 任务执行界面 immediately, no intermediate
+   * toast. The high-priority notification is posted first so the status bar also gets the
+   * "current alarm" icon next to the persistent "next task" icon.
+   */
+  fun launchAlarmFace(id: Long) {
+    val i = Intent(context, AtkAlarmActivity::class.java).apply {
+      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+      putExtra(EXTRA_ID, id)
+    }
+    try {
+      context.startActivity(i)
+    } catch (e: Exception) {
+      // Background activity launch may be restricted on some ROMs; the full-screen
+      // notification intent still opens the same surface in that case.
+    }
+  }
 
   /** Refresh only the persistent "下一次任务" notification, e.g. right after an alarm fires. */
   fun refreshNext() {
@@ -162,7 +194,13 @@ class AtkEngine(private val context: Context) {
     try { showNextNotification(items) } catch (e: Exception) { }
   }
 
-  fun showNotification(item: AtkItem) {
+  /**
+   * Post the "current alarm task" notification. Its small icon is the left-most alarm icon in
+   * the status bar; the persistent next-task notification supplies the one next to it.
+   * @param fullScreen when false the caller opens 任务执行界面 itself (测试执行), avoiding a
+   *                   duplicate activity launch from the full-screen intent.
+   */
+  fun showNotification(item: AtkItem, fullScreen: Boolean = true) {
     ensureChannel()
     val title = item.name.ifBlank { "定时提醒" }
     val body = buildString {
@@ -181,8 +219,11 @@ class AtkEngine(private val context: Context) {
     )
     val snooze = actionIntent(ACTION_SNOOZE, item.id, (item.id * 7 + 4).toInt())
     val stop = actionIntent(ACTION_STOP, item.id, (item.id * 7 + 5).toInt())
+    // 测试执行 opens the face directly: use the quiet channel so a heads-up card never covers
+    // the full-screen surface. A real firing keeps the HIGH channel + full-screen intent.
+    val channelId = if (fullScreen) CHANNEL else CHANNEL_NEXT
     val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      Notification.Builder(context, CHANNEL)
+      Notification.Builder(context, channelId)
     } else {
       @Suppress("DEPRECATION") Notification.Builder(context)
     }
@@ -191,13 +232,18 @@ class AtkEngine(private val context: Context) {
       .setContentTitle(title)
       .setContentText(body)
       .setStyle(Notification.BigTextStyle().bigText(body))
-      .setPriority(Notification.PRIORITY_MAX)
+      .setPriority(if (fullScreen) Notification.PRIORITY_MAX else Notification.PRIORITY_LOW)
       .setCategory(Notification.CATEGORY_ALARM)
-      .setAutoCancel(true)
+      .setAutoCancel(false)
+      .setOngoing(true)
       .setContentIntent(full)
-      .setFullScreenIntent(full, true)
-      .setSound(Settings.System.DEFAULT_ALARM_ALERT_URI, Notification.AUDIO_ATTRIBUTES_DEFAULT)
-      .setVibrate(longArrayOf(0, 400, 300, 400))
+      .apply {
+        if (fullScreen) {
+          setFullScreenIntent(full, true)
+          setSound(Settings.System.DEFAULT_ALARM_ALERT_URI, Notification.AUDIO_ATTRIBUTES_DEFAULT)
+          setVibrate(longArrayOf(0, 400, 300, 400))
+        }
+      }
       .addAction(R.drawable.ic_atk_stat, "贪睡 10 分钟", snooze)
       .addAction(R.drawable.ic_atk_stat, "终止提醒", stop)
       .build()
@@ -246,11 +292,6 @@ class AtkEngine(private val context: Context) {
         best = item
       }
     }
-    val item = best
-    if (item == null) {
-      try { notifications.cancel(NEXT_ID) } catch (e: Exception) { }
-      return
-    }
     val whenText = try {
       val dayFmt = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.CHINA)
       val hmFmt = java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
@@ -267,6 +308,13 @@ class AtkEngine(private val context: Context) {
     } catch (e: Exception) {
       ""
     }
+    // The original keeps a status-bar icon even when every timer is disabled; cancelling the
+    // notification made the icon disappear entirely on a fresh install (all samples are off).
+    val bodyText = if (best == null) {
+      "暂无启用的定时任务"
+    } else {
+      best.name.ifBlank { "定时提醒" } + " - [$whenText]"
+    }
     val open = PendingIntent.getActivity(
       context, NEXT_ID,
       Intent(context, com.lentikr.reminder.MainActivity::class.java)
@@ -281,10 +329,10 @@ class AtkEngine(private val context: Context) {
     val n = builder
       .setSmallIcon(R.drawable.ic_atk_stat)
       .setContentTitle(context.getString(R.string.app_name))
-      .setContentText(item.name.ifBlank { "定时提醒" } + " - [$whenText]")
+      .setContentText(bodyText)
       .setContentIntent(open)
       .setAutoCancel(false)
-      .setOngoing(false)
+      .setOngoing(true)
       .setOnlyAlertOnce(true)
       .setPriority(Notification.PRIORITY_LOW)
       .setCategory(Notification.CATEGORY_REMINDER)

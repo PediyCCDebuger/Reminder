@@ -104,6 +104,8 @@ fun AtkTitleBar(
   suffixColor: Color = AtkSkin.red,
   onBack: (() -> Unit)? = null,
   onMenu: (() -> Unit)? = null,
+  onSelect: (() -> Unit)? = null,
+  selectMode: Boolean = false,
 ) {
   Box(
     Modifier
@@ -126,6 +128,15 @@ fun AtkTitleBar(
         Text(suffix, color = suffixColor, fontSize = 14.sp, fontWeight = FontWeight.Bold)
       }
       Spacer(Modifier.weight(1f))
+      if (onSelect != null) {
+        Text(
+          if (selectMode) "取消多选" else "多选",
+          color = if (selectMode) AtkSkin.red else Color(0xFF333333),
+          fontSize = 14.sp,
+          fontWeight = FontWeight.Bold,
+          modifier = Modifier.clickable(onClick = onSelect).padding(horizontal = 8.dp),
+        )
+      }
       if (onMenu != null) {
         Text(
           "≡", color = Color(0xFF333333), fontSize = 22.sp, fontWeight = FontWeight.Bold,

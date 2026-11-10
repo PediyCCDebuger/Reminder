@@ -40,7 +40,8 @@
             android:exported="false"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
-            android:theme="@style/Theme.Reminder" />
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.Reminder.Alarm" />
 
         <receiver
             android:name=".timer.AtkReceiver"

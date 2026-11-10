@@ -9,10 +9,31 @@ import android.net.Uri
 import java.io.File
 import java.io.FileOutputStream
 
+private val BAR_SPLIT =
+  java.util.regex.Pattern.compile(java.util.regex.Pattern.quote("|"))
+private val DOLLAR_SPLIT =
+  java.util.regex.Pattern.compile(java.util.regex.Pattern.quote("$"))
+private val DOLLAR_STR: String = '$'.toString()
+
+/**
+ * Rewrite exactly one `base[]` field of the original AddinTimer parameter string, leaving
+ * every other byte (enabled flag, rule, action params included) untouched.
+ */
+fun replaceBaseField(raw: String, index: Int, value: String): String {
+  if (index < 0) return raw
+  val seg = BAR_SPLIT.split(raw, -1).toMutableList()
+  if (seg.size < 2) return raw
+  val b = DOLLAR_SPLIT.split(seg[1], -1).toMutableList()
+  if (index >= b.size) return raw
+  b[index] = value
+  seg[1] = b.joinToString(DOLLAR_STR)
+  return seg.joinToString("|")
+}
+
 /**
  * Storage that is byte-for-byte compatible with an AddinTimer `.atk` backup: a plain SQLite
  * database with `timer(id INTEGER PRIMARY KEY, param TEXT)`. Import = read that table,
- * export = write that table.
+ * export = write that table. Nothing is normalised on the way in or out.
  */
 class AtkStore(private val context: Context) {
 
@@ -114,19 +135,75 @@ class AtkStore(private val context: Context) {
   }
 
   /**
-   * The unregistered original refused to activate more than 5 timers, so old backups contain
-   * many disabled rows. This build has no such cap; enable every imported timer while keeping
-   * every other byte of the original parameter string untouched.
+   * One-time upgrade fix for 2.3.0: that build seeded the 18 built-in samples with every
+   * ALARM enabled. The original AddinTimer ships them ALL disabled.
+   *
+   * To never touch a user's own data, this only runs when the whole database still has the
+   * exact 2.3.0 seed signature: 18 untouched sample rows, every ALARM on and every FM/SCENE
+   * off. Any imported backup (mixed enabled flags), edited row or new timer breaks the
+   * signature and the database is left untouched. The caller guards it with a preference so
+   * samples the user later activates are never reset again.
    */
-  private fun enableParam(raw: String): String {
-    val seg = BAR_SPLIT.split(raw, -1).toMutableList()
-    // Only reminders are executed by this build; leave FM / SCENE rows exactly as backed up.
-    if (seg.size < 2 || seg[0] != "ALARM") return raw
-    val b = DOLLAR_SPLIT.split(seg[1], -1).toMutableList()
-    if (b.size <= 10) return raw
-    b[10] = "1"
-    seg[1] = b.joinToString("$")
-    return seg.joinToString("|")
+  fun resetBuiltInSampleStates(): Int {
+    val local = db()
+    val sampleSet = AtkSamples.PARAMS.toHashSet()
+    val rows = ArrayList<Pair<Long, String>>()
+    val c = local.rawQuery("SELECT id, param FROM timer", null)
+    c.use {
+      while (it.moveToNext()) rows.add(it.getLong(0) to (it.getString(1) ?: ""))
+    }
+    if (rows.size != AtkSamples.PARAMS.size) return 0
+    for ((id, raw) in rows) {
+      if (replaceBaseField(raw, 10, "0") !in sampleSet) return 0
+      val kind = raw.substringBefore('|')
+      val on = AtkItem.parse(id, raw).enabled
+      if ((kind == "ALARM") != on) return 0 // 2.3.0 turned ALARM on, left FM/SCENE off
+    }
+    var changed = 0
+    local.beginTransaction()
+    try {
+      for ((id, raw) in rows) {
+        val disabled = replaceBaseField(raw, 10, "0")
+        if (disabled == raw) continue
+        val v = ContentValues()
+        v.put("param", disabled)
+        local.update("timer", v, "id = ?", arrayOf(id.toString()))
+        changed++
+      }
+      local.setTransactionSuccessful()
+    } finally {
+      local.endTransaction()
+    }
+    return changed
+  }
+
+  /**
+   * Move whole rows to another bottom tab. Only base[1] is rewritten; the enabled flag,
+   * rule string, action parameters and every other byte of the .atk param stay untouched.
+   * Returns the number of rows actually changed.
+   */
+  fun moveToPage(ids: Collection<Long>, page: Int): Int {
+    val value = (100 + page.coerceIn(0, 3)).toString()
+    val local = db()
+    var changed = 0
+    local.beginTransaction()
+    try {
+      for (id in ids) {
+        val c = local.rawQuery("SELECT param FROM timer WHERE id = ?", arrayOf(id.toString()))
+        val raw = c.use { if (it.moveToFirst()) (it.getString(0) ?: "") else "" }
+        if (raw.isEmpty()) continue
+        val next = replaceBaseField(raw, 1, value)
+        if (next == raw) continue
+        val v = ContentValues()
+        v.put("param", next)
+        local.update("timer", v, "id = ?", arrayOf(id.toString()))
+        changed++
+      }
+      local.setTransactionSuccessful()
+    } finally {
+      local.endTransaction()
+    }
+    return changed
   }
 
   /** Same actlog table the original app used; feeds 查看日志 in the long-press menu. */
@@ -165,7 +242,9 @@ class AtkStore(private val context: Context) {
     val rows = ArrayList<String>()
     try {
       val c = src.rawQuery("SELECT param FROM timer ORDER BY id", null)
-      c.use { while (it.moveToNext()) rows.add(enableParam(it.getString(0) ?: "")) }
+      // Verbatim: the enabled flag (base[10]) and category (base[1]) belong to the backup.
+      // Importing must never turn disabled timers on or reassign their tab.
+      c.use { while (it.moveToNext()) rows.add(it.getString(0) ?: "") }
     } finally {
       src.close()
       cache.delete()
@@ -221,9 +300,5 @@ class AtkStore(private val context: Context) {
 
   companion object {
     private const val DB_NAME = "at01.db"
-    private val BAR_SPLIT =
-      java.util.regex.Pattern.compile(java.util.regex.Pattern.quote("|"))
-    private val DOLLAR_SPLIT =
-      java.util.regex.Pattern.compile(java.util.regex.Pattern.quote("$"))
   }
 }

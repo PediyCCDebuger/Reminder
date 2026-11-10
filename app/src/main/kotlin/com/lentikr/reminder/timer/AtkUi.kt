@@ -10,6 +10,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -60,7 +62,7 @@ private enum class Screen { LIST, EDIT, SETTINGS, TAGS, PERMISSIONS }
 
 private val TAB_NAMES = listOf("常用", "生活", "纪念日", "生日")
 private val CONTEXT_ENTRIES = listOf(
-  "测试执行", "删除条目", "参考新建", "执行规划", "查看日志", "移动分类",
+  "测试执行", "删除条目", "参考新建", "执行规划", "查看日志", "移动分类", "多选模式",
 )
 private val PLAN_FMT = DateTimeFormatter.ofPattern("yyyy/MM/dd (E) HH:mm")
 
@@ -88,6 +90,9 @@ fun TimerApp() {
     var planItem by remember { mutableStateOf<AtkItem?>(null) }
     var logItem by remember { mutableStateOf<AtkItem?>(null) }
     var moveItem by remember { mutableStateOf<AtkItem?>(null) }
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedIds by remember { mutableStateOf(emptySet<Long>()) }
+    var batchMoveOpen by remember { mutableStateOf(false) }
 
     fun refresh() {
       timerList = try { store.all() } catch (e: Exception) { emptyList() }
@@ -102,6 +107,11 @@ fun TimerApp() {
           store.seedSamples()
           prefs.edit().putBoolean("samples_seeded", true).apply()
         }
+        // 2.3.0 wrongly shipped all 18 samples enabled; correct that once, on upgrade only.
+        if (!prefs.getBoolean("sample_states_fixed", false)) {
+          store.resetBuiltInSampleStates()
+          prefs.edit().putBoolean("sample_states_fixed", true).apply()
+        }
         timerList = store.all()
         engine.rescheduleAll()
       } catch (e: Exception) {
@@ -109,10 +119,15 @@ fun TimerApp() {
       }
     }
 
-    BackHandler(enabled = screen != Screen.LIST) {
-      screen = Screen.LIST
-      // Picking 通知栏图标 in 系统设置 takes effect as soon as we return to the list.
-      try { engine.rescheduleAll() } catch (e: Exception) { }
+    BackHandler(enabled = selectionMode || screen != Screen.LIST) {
+      if (selectionMode) {
+        selectionMode = false
+        selectedIds = emptySet()
+      } else {
+        screen = Screen.LIST
+        // Picking 通知栏图标 in 系统设置 takes effect as soon as we return to the list.
+        try { engine.rescheduleAll() } catch (e: Exception) { }
+      }
     }
 
     val openImport = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -149,12 +164,29 @@ fun TimerApp() {
           timerList = timerList,
           tab = tab,
           engine = engine,
-          onTab = { tab = it },
+          selectionMode = selectionMode,
+          selectedIds = selectedIds,
+          onTab = { tab = it; selectedIds = emptySet() },
           onNew = { newTaskOpen = true },
           onMenu = { systemMenuOpen = true },
-          onEdit = { id -> editingId = id; preset = 0; screen = Screen.EDIT },
+          onEdit = { id ->
+            if (selectionMode) {
+              selectedIds = if (id in selectedIds) selectedIds - id else selectedIds + id
+            } else {
+              editingId = id; preset = 0; screen = Screen.EDIT
+            }
+          },
           onLongClick = { item -> contextItem = item },
           onToggle = { id, on -> store.setEnabled(id, on); refresh() },
+          onSelectMode = { on ->
+            selectionMode = on
+            if (!on) selectedIds = emptySet()
+          },
+          onSelectAll = {
+            val visible = timerList.filter { it.pageIndex() == tab }.map { it.id }
+            selectedIds = if (selectedIds.containsAll(visible)) emptySet() else visible.toSet()
+          },
+          onBatchMove = { batchMoveOpen = true },
         )
 
         Screen.EDIT -> AtkEditScreen(
@@ -205,7 +237,7 @@ fun TimerApp() {
               }
               try { context.startActivity(Intent.createChooser(send, "分享好友")) } catch (e: Exception) { }
             }
-            5 -> message = "当前已是最新版本（2.3.0），无需更新。"
+            5 -> message = "当前已是最新版本（2.4.0），无需更新。"
             6 -> {
               try {
                 context.startActivity(
@@ -267,7 +299,7 @@ fun TimerApp() {
             toast(
               context,
               (if (which == 0) "已恢复 $n 条" else "已追加 $n 条") +
-                "；已解除激活数量上限，提醒类任务全部启用",
+                "；激活状态与分类均按备份原样保留",
             )
           } catch (e: Exception) {
             message = "恢复失败：" + e.message
@@ -284,9 +316,11 @@ fun TimerApp() {
           contextItem = null
           when (i) {
             0 -> {
-              engine.showNotification(item)
+              // Original behaviour: 测试执行 opens the 任务执行界面 directly. The status bar
+              // gets the current-task alarm icon plus the persistent next-task icon.
               store.log(item.id, 0, "测试执行")
-              message = "已测试执行「${item.name}」"
+              engine.showNotification(item, fullScreen = false)
+              engine.launchAlarmFace(item.id)
             }
             1 -> deleteTarget = item
             2 -> {
@@ -301,6 +335,10 @@ fun TimerApp() {
             3 -> planItem = item
             4 -> logItem = item
             5 -> moveItem = item
+            6 -> {
+              selectionMode = true
+              selectedIds = setOf(item.id)
+            }
           }
         },
         onDismiss = { contextItem = null },
@@ -357,8 +395,7 @@ fun TimerApp() {
         options = TAB_NAMES,
         selected = item.pageIndex(),
         onPick = { i ->
-          item.moveToPage(i)
-          store.save(item)
+          store.moveToPage(listOf(item.id), i)
           refresh()
           moveItem = null
           tab = i
@@ -368,14 +405,34 @@ fun TimerApp() {
       )
     }
 
+    if (batchMoveOpen) {
+      AtkChoiceDialog(
+        title = "批量移动分类（已选 ${selectedIds.size} 项）",
+        options = TAB_NAMES,
+        selected = tab,
+        onPick = { i ->
+          val n = try { store.moveToPage(selectedIds, i) } catch (e: Exception) { 0 }
+          batchMoveOpen = false
+          selectionMode = false
+          selectedIds = emptySet()
+          tab = i
+          refresh()
+          toast(context, "已移动 $n 项到「${TAB_NAMES[i]}」")
+        },
+        onDismiss = { batchMoveOpen = false },
+      )
+    }
+
     if (aboutOpen) {
       val crash = AtkCrash.last(context)
       AtkMessageDialog(
         title = "关于软件",
-        body = "Reminder 2.3.0 · AddinTimer 定时部分复刻版\n" +
+        body = "Reminder 2.4.0 · AddinTimer 定时部分复刻版\n" +
           "数据格式与 AddinTimer 2.1G 完全一致，可导入 / 导出 .atk 备份。\n" +
+          "导入时逐字节保留激活状态与分类，不自动启用任何任务。\n" +
           "已去除原版未注册版的激活数量上限，任意多条提醒可同时启用。\n" +
-          "首次启动载入 18 条原版示例任务；参数设置以原版截图为准。\n" +
+          "首次启动载入 18 条原版示例任务（默认全部未激活）；参数设置以原版截图为准。\n" +
+          "标题栏「多选」可勾选多条任务批量移动分类。\n" +
           "Android 12+ 请在「系统设置 → 服务状态」完成精确闹钟、通知、电池优化与全屏通知授权。" +
           (if (crash.isNotBlank()) "\n\n最近一次崩溃日志：\n$crash" else ""),
         onDismiss = { aboutOpen = false },
@@ -395,15 +452,27 @@ private fun MainScreen(
   timerList: List<AtkItem>,
   tab: Int,
   engine: AtkEngine,
+  selectionMode: Boolean,
+  selectedIds: Set<Long>,
   onTab: (Int) -> Unit,
   onNew: () -> Unit,
   onMenu: () -> Unit,
   onEdit: (Long) -> Unit,
   onLongClick: (AtkItem) -> Unit,
   onToggle: (Long, Boolean) -> Unit,
+  onSelectMode: (Boolean) -> Unit,
+  onSelectAll: () -> Unit,
+  onBatchMove: () -> Unit,
 ) {
   Column(Modifier.fillMaxSize()) {
-    AtkTitleBar("Reminder", onMenu = onMenu)
+    AtkTitleBar(
+      "Reminder",
+      suffix = if (selectionMode) "  已选 ${selectedIds.size} 项" else "",
+      suffixColor = AtkSkin.green,
+      onMenu = onMenu,
+      onSelect = { onSelectMode(!selectionMode) },
+      selectMode = selectionMode,
+    )
     Spacer(Modifier.height(4.dp))
     AtkBlueButton("新增任务", onNew)
     Spacer(Modifier.height(4.dp))
@@ -417,6 +486,8 @@ private fun MainScreen(
           } else {
             0L
           },
+          selectionMode = selectionMode,
+          selected = item.id in selectedIds,
           onClick = { onEdit(item.id) },
           onLongClick = { onLongClick(item) },
           onToggle = { on -> onToggle(item.id, on) },
@@ -433,7 +504,45 @@ private fun MainScreen(
         }
       }
     }
+    if (selectionMode) {
+      Row(
+        Modifier
+          .fillMaxWidth()
+          .height(52.dp)
+          .background(Color(0xFF141414))
+          .border(1.dp, AtkSkin.divider),
+      ) {
+        SelectionButton("全选", Modifier.weight(1f), onSelectAll)
+        SelectionButton(
+          "移动分类 (${selectedIds.size})",
+          Modifier.weight(2f),
+          onBatchMove,
+          enabled = selectedIds.isNotEmpty(),
+        )
+        SelectionButton("取消", Modifier.weight(1f)) { onSelectMode(false) }
+      }
+    }
     AtkTabBar(tab, onTab)
+  }
+}
+
+@Composable
+private fun SelectionButton(
+  text: String,
+  modifier: Modifier,
+  onClick: () -> Unit,
+  enabled: Boolean = true,
+) {
+  Box(
+    modifier.fillMaxHeight().clickable(enabled = enabled, onClick = onClick),
+    contentAlignment = Alignment.Center,
+  ) {
+    Text(
+      text,
+      color = if (enabled) Color.White else Color(0xFF6A6A6A),
+      fontSize = 15.sp,
+      fontWeight = FontWeight.Bold,
+    )
   }
 }
 
@@ -442,6 +551,8 @@ private fun MainScreen(
 private fun AtkTimerRow(
   item: AtkItem,
   next: Long,
+  selectionMode: Boolean,
+  selected: Boolean,
   onClick: () -> Unit,
   onLongClick: () -> Unit,
   onToggle: (Boolean) -> Unit,
@@ -463,6 +574,19 @@ private fun AtkTimerRow(
         .padding(horizontal = 6.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
+      if (selectionMode) {
+        Box(
+          Modifier
+            .size(26.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .border(2.dp, if (selected) AtkSkin.green else Color(0xFF9A9A9A), RoundedCornerShape(4.dp))
+            .background(if (selected) AtkSkin.green else Color.Transparent),
+          contentAlignment = Alignment.Center,
+        ) {
+          if (selected) Text("✓", color = Color.Black, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.width(8.dp))
+      }
       Image(
         painter = painterResource(R.drawable.ic_atk_stat),
         contentDescription = null,
