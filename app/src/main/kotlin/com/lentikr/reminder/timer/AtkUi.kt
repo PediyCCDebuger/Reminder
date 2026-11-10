@@ -519,7 +519,7 @@ private fun MainScreen(
           onBatchMove,
           enabled = selectedIds.isNotEmpty(),
         )
-        SelectionButton("取消", Modifier.weight(1f)) { onSelectMode(false) }
+        SelectionButton("取消", Modifier.weight(1f), onClick = { onSelectMode(false) })
       }
     }
     AtkTabBar(tab, onTab)
