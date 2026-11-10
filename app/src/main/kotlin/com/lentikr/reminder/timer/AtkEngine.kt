@@ -360,7 +360,8 @@ class AtkEngine(private val context: Context) {
     // Link the notification to the active media session so the mediaPlayback foreground service
     // is recognised as genuine media playback and not killed while the screen is locked.
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-      AtkAlarmSound.sessionToken()?.let { builder.setMediaSession(it) }
+      val sessionToken = AtkAlarmSound.sessionToken()
+      if (sessionToken != null) builder.setMediaSession(sessionToken)
     }
     return builder
       .setSmallIcon(R.drawable.ic_atk_stat)
