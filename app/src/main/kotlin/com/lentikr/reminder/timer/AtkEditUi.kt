@@ -12,6 +12,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -405,9 +407,21 @@ private fun AtkTimePickerDialog(
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
       ) {
-        TimeStepperColumn(hour, 23, 60) { shift(it) }
+        TimeStepperColumn(
+          value = hour,
+          max = 23,
+          onStepUp = { shift(60) },
+          onStepDown = { shift(-60) },
+          onSet = { hour = it.coerceIn(0, 23) },
+        )
         Text(":", color = Color.White, fontSize = 30.sp, modifier = Modifier.padding(horizontal = 8.dp))
-        TimeStepperColumn(minute, 59, step) { shift(it) }
+        TimeStepperColumn(
+          value = minute,
+          max = 59,
+          onStepUp = { shift(step) },
+          onStepDown = { shift(-step) },
+          onSet = { minute = it.coerceIn(0, 59) },
+        )
       }
       Row(
         Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
@@ -437,27 +451,54 @@ private fun AtkTimePickerDialog(
 
 /**
  * One hour/minute column: silver "+" bar, an editable white value box, silver "−" bar.
- * [+] and [−] both call the same shift() so a minute step can carry into the hour.
+ * [+] and [−] step by the caller-supplied amount (hour steps a whole hour, minute steps the
+ * selected 1/5/10), and carry into the other field through [AtkTimePickerDialog.shift]. The
+ * editable box sets its OWN field absolutely (see TimeValueField) so typing the hour never
+ * disturbs the minute and the typed digits are never overwritten.
  */
 @Composable
-private fun TimeStepperColumn(value: Int, max: Int, step: Int, onShift: (Int) -> Unit) {
+private fun TimeStepperColumn(
+  value: Int,
+  max: Int,
+  onStepUp: () -> Unit,
+  onStepDown: () -> Unit,
+  onSet: (Int) -> Unit,
+) {
   Column(horizontalAlignment = Alignment.CenterHorizontally) {
-    TimeStepBar("+") { onShift(step) }
+    TimeStepBar("+") { onStepUp() }
     Spacer(Modifier.height(8.dp))
-    TimeValueField(value, max) { onShift(it - value) }
+    TimeValueField(value, max, onSet)
     Spacer(Modifier.height(8.dp))
-    TimeStepBar("−") { onShift(-step) }
+    TimeStepBar("−") { onStepDown() }
   }
 }
 
-/** White box that accepts a typed number, exactly like the original's editable time field. */
+/**
+ * White box that accepts a typed number, exactly like the original's editable time field.
+ *
+ * The typed value is reported back as an ABSOLUTE value for this field (hour or minute), never a
+ * delta: typing 8 into the hour box must set the hour to 8, leaving the minute untouched. The
+ * caller's step buttons still drive the shared carry via shift(), so a minute step of 5 at 11:58
+ * still rolls over into 12:03.
+ *
+ * Re-formatting is limited to (a) an outside change (a +/- tap, value != shown digits) and
+ * (b) losing focus, so the user's keystrokes are never clobbered mid-edit.
+ */
 @Composable
 private fun TimeValueField(value: Int, max: Int, onSet: (Int) -> Unit) {
   var text by remember { mutableStateOf(String.format(Locale.CHINA, "%02d", value)) }
-  // Re-format only when the value changed from outside (a +/- tap), never while typing.
+  val interactionSource = remember { MutableInteractionSource() }
+  val focused by interactionSource.collectIsFocusedAsState()
   LaunchedEffect(value) {
-    if ((text.toIntOrNull() ?: -1) != value) {
+    val cur = text.toIntOrNull()
+    if (cur != null && cur != value) {
       text = String.format(Locale.CHINA, "%02d", value)
+    }
+  }
+  LaunchedEffect(focused) {
+    if (!focused) {
+      val cur = text.toIntOrNull() ?: value
+      text = String.format(Locale.CHINA, "%02d", cur.coerceIn(0, max))
     }
   }
   Box(
@@ -468,24 +509,23 @@ private fun TimeValueField(value: Int, max: Int, onSet: (Int) -> Unit) {
       value = text,
       onValueChange = { raw ->
         val digits = raw.filter { it.isDigit() }.take(2)
-        val n = digits.toIntOrNull()
         when {
           digits.isEmpty() -> {
             text = ""
             onSet(0)
           }
-          n == null -> Unit
-          n > max -> {
-            text = String.format(Locale.CHINA, "%02d", max)
-            onSet(max)
-          }
           else -> {
-            text = digits
-            onSet(n)
+            val n = digits.toIntOrNull() ?: 0
+            val clamped = n.coerceIn(0, max)
+            // Show the clamped two-digit form only when the typed value was actually out of
+            // range, so an in-range edit never flashes a reformatted string under the cursor.
+            text = if (clamped == n) digits else String.format(Locale.CHINA, "%02d", clamped)
+            onSet(clamped)
           }
         }
       },
       singleLine = true,
+      interactionSource = interactionSource,
       textStyle = TextStyle(
         color = Color(0xFF111111),
         fontSize = 30.sp,

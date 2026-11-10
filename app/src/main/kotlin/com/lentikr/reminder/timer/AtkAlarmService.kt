@@ -28,6 +28,8 @@ class AtkAlarmService : Service() {
     const val ACTION_START = "svc_start"
     const val ACTION_STOP = "svc_stop"
     const val ACTION_SNOOZE = "svc_snooze"
+    /** Set by 60 秒后真实触发 so the test fires the chain even on a disabled task. */
+    const val EXTRA_FORCE = "svc_force"
     private const val WAKE_TIMEOUT_MS = 20 * 60 * 1000L
   }
 
@@ -45,7 +47,8 @@ class AtkAlarmService : Service() {
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     val action = intent?.getStringExtra(EXTRA_ACTION) ?: ACTION_START
     val id = intent?.getLongExtra(AtkEngine.EXTRA_ID, -1L) ?: -1L
-    AtkDiag.log(this, "svc: onStartCommand action=$action id=$id")
+    val force = intent?.getBooleanExtra(EXTRA_FORCE, false) ?: false
+    AtkDiag.log(this, "svc: onStartCommand action=$action id=$id force=$force")
 
     if (action == ACTION_STOP || action == ACTION_SNOOZE) {
       stopEverything(startId)
@@ -53,11 +56,28 @@ class AtkAlarmService : Service() {
     }
 
     val engine = AtkEngine(this)
-    val item = if (id >= 0) runCatching { AtkStore(this).get(id) }.getOrNull() else null
-    if (item == null || !item.enabled) {
-      AtkDiag.log(this, "svc: 任务不存在或已停用，结束")
+    val (item, dbError) = loadItem(id)
+    if (item == null) {
+      // Distinguish "row missing" from "database threw on a cold start" so the 权限自检 →
+      // 触发日志 page can tell the user exactly which link broke (the common case on ColorOS is
+      // a swallowed SQLite exception when the alarm fires and starts this service from cold).
+      AtkDiag.log(
+        this,
+        "svc: 任务获取失败 id=$id " + (if (dbError != null) "错误=$dbError" else "（数据库中无此 id）"),
+      )
       stopEverything(startId)
       return START_NOT_STICKY
+    }
+    if (!item.enabled) {
+      if (force) {
+        // 60 秒后真实触发 explicitly forces the ring chain even on a disabled task, so the user
+        // can verify 响铃 / 渐响 / 执行界面 without first enabling it.
+        AtkDiag.log(this, "svc: 任务已停用，但 60 秒测试强制触发 id=$id（base[10]=${item.base.getOrNull(10) ?: "?"}, 名称=${item.name}）")
+      } else {
+        AtkDiag.log(this, "svc: 任务已停用 id=$id（base[10]=${item.base.getOrNull(10) ?: "?"}, 名称=${item.name}）")
+        stopEverything(startId)
+        return START_NOT_STICKY
+      }
     }
 
     currentId = id
@@ -80,6 +100,38 @@ class AtkAlarmService : Service() {
     engine.launchAlarmFace(id)
     if (!foregrounded) stopSelf(startId)
     return START_NOT_STICKY
+  }
+
+  /**
+   * Read the firing task from the database, retrying a few times because the alarm may have
+   * started this service from a cold process where the first SQLite open briefly contends with a
+   * just-released connection (a common ColorOS cold-start hiccup that previously surfaced as a
+   * silent "任务不存在或已停用"). Uses the application context so the read never depends on the
+   * service's own (possibly not-yet-initialised) context.
+   *
+   * Returns the item plus, on failure, the last exception message so the diagnostic log can show
+   * the real reason instead of a generic "not found".
+   */
+  private fun loadItem(id: Long): Pair<AtkItem?, String?> {
+    if (id < 0) return null to "id 无效"
+    var lastErr: String? = null
+    for (attempt in 0 until 3) {
+      try {
+        val item = AtkStore(applicationContext).get(id)
+        if (item != null) return item to null
+        lastErr = "数据库无此 id（行不存在）"
+      } catch (e: Exception) {
+        lastErr = "${e.javaClass.simpleName}: ${e.message}"
+      }
+      if (attempt < 2) {
+        try {
+          Thread.sleep(150)
+        } catch (e: InterruptedException) {
+          Thread.currentThread().interrupt()
+        }
+      }
+    }
+    return null to lastErr
   }
 
   /**

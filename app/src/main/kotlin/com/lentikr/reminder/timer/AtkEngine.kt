@@ -240,6 +240,9 @@ class AtkEngine(private val context: Context) {
       action = AtkAlarmService.ACTION_START
       putExtra(AtkAlarmService.EXTRA_ACTION, AtkAlarmService.ACTION_START)
       putExtra(EXTRA_ID, id)
+      // Force the ring chain even if the task is disabled, so the 60s test verifies 响铃 / 渐响 /
+      // 执行界面 without first having to enable the task (测试执行 already ignores enabled).
+      putExtra(AtkAlarmService.EXTRA_FORCE, true)
     }
     val pi = PendingIntent.getForegroundService(
       context, (id * 7 + 7).toInt(), i,
@@ -247,11 +250,20 @@ class AtkEngine(private val context: Context) {
     )
     val at = System.currentTimeMillis() + 60_000L
     AtkDiag.log(context, "排程: 60 秒后真实触发测试 id=$id")
+    // Use setAlarmClock (not setExactAndAllowWhileIdle): the latter is routinely deferred by
+    // several minutes when the device is dozing, which made the test look like "nothing rang".
+    // setAlarmClock is the highest-priority, doze-exempt alarm and is what the real schedule
+    // already uses, so the test now exercises the exact same on-time path.
+    val info = AlarmManager.AlarmClockInfo(at, alarmActivityIntent(id, (id * 7 + 9).toInt()))
     try {
-      alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+      alarms.setAlarmClock(info, pi)
     } catch (e: SecurityException) {
-      AtkDiag.log(context, "排程: 测试触发无法用精确闹钟，改用 set()")
-      alarms.set(AlarmManager.RTC_WAKEUP, at, pi)
+      AtkDiag.log(context, "排程: 测试触发 setAlarmClock 被拒（${e.message}），改用 setExact")
+      try {
+        alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+      } catch (e2: SecurityException) {
+        alarms.set(AlarmManager.RTC_WAKEUP, at, pi)
+      }
     }
   }
 
