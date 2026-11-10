@@ -101,6 +101,7 @@ object AlarmSpec {
    * on the original screen too). Indices 19/20 are internal counters: not shown, never dropped.
    */
   val FIELDS: List<ActSpec> = listOf(
+    // 通知设置（8 项，顺序与原版截图一致）
     ActSpec(1, "播报时间", FieldKind.SELECT, AtkOptions.RING_TIME, SECTION_NOTIFY),
     ActSpec(6, "铃声类型", FieldKind.SELECT, AtkOptions.RING_TYPE, SECTION_NOTIFY),
     ActSpec(7, "选择路径", FieldKind.TEXT, section = SECTION_NOTIFY),
@@ -109,24 +110,28 @@ object AlarmSpec {
     ActSpec(10, "渐响模式", FieldKind.SELECT, AtkOptions.RING_VOL_STEP, SECTION_NOTIFY),
     ActSpec(11, "强制外放", FieldKind.SELECT, AtkOptions.FORCE_SPEAKER, SECTION_NOTIFY),
     ActSpec(12, "振动类型", FieldKind.SELECT, AtkOptions.VIBRATE, SECTION_NOTIFY),
+    // 贪睡设置
     ActSpec(13, "预设时间", FieldKind.SELECT, AtkOptions.SNAP_DUR, SECTION_SNOOZE),
     ActSpec(14, "自动贪睡", FieldKind.SELECT, AtkOptions.SNAP_REPEAT, SECTION_SNOOZE),
+    // 界面设置
     ActSpec(15, "屏幕模式", FieldKind.SELECT, AtkOptions.LOCK_TYPE, SECTION_UI),
     ActSpec(18, "翻转感应", FieldKind.SELECT, AtkOptions.SENSOR_GRAVITY, SECTION_UI),
+    ActSpec(26, "界面样式", FieldKind.SELECT, AtkOptions.UI_STYLE, SECTION_UI),
+    ActSpec(21, "算术题解锁", FieldKind.SELECT, AtkOptions.ANSWER_PROBLEM, SECTION_UI),
+    ActSpec(25, "电源键按下", FieldKind.SELECT, AtkOptions.POWER_STYLE, SECTION_UI),
+    ActSpec(24, "手动贪睡", FieldKind.SELECT, AtkOptions.HAND_SNAP, SECTION_UI),
+    ActSpec(16, "终止确认", FieldKind.SELECT, AtkOptions.TIP_CLOSE, SECTION_UI),
+    // 其他设置
     ActSpec(0, "提醒备注", FieldKind.TEXT, section = SECTION_OTHER),
-    ActSpec(2, "播报位置", FieldKind.SELECT, AtkOptions.RING_SORT, SECTION_OTHER),
-    ActSpec(3, "声音模式", FieldKind.SELECT, AtkOptions.RING_MODE, SECTION_OTHER),
-    ActSpec(4, "延迟时间", FieldKind.SELECT, AtkOptions.RING_DELAY, SECTION_OTHER),
-    ActSpec(5, "间隔时间", FieldKind.SELECT, AtkOptions.RING_INTERVAL, SECTION_OTHER),
-    ActSpec(23, "播报内容", FieldKind.MULTI, AtkOptions.BROADCAST_CONTENT, SECTION_OTHER),
-    ActSpec(24, "手动贪睡", FieldKind.SELECT, AtkOptions.HAND_SNAP, SECTION_OTHER),
-    ActSpec(16, "终止确认", FieldKind.SELECT, AtkOptions.TIP_CLOSE, SECTION_OTHER),
-    ActSpec(17, "光线感应器", FieldKind.SELECT, AtkOptions.SENSOR_LIGHT, SECTION_OTHER),
-    ActSpec(21, "算术题解锁", FieldKind.SELECT, AtkOptions.ANSWER_PROBLEM, SECTION_OTHER),
-    ActSpec(22, "暂停方式", FieldKind.SELECT, AtkOptions.STOP_STYLE, SECTION_OTHER),
-    ActSpec(25, "电源键按下", FieldKind.SELECT, AtkOptions.POWER_STYLE, SECTION_OTHER),
-    ActSpec(26, "界面样式", FieldKind.SELECT, AtkOptions.UI_STYLE, SECTION_OTHER),
   )
+
+  /**
+   * Indices that exist in the original 27-field ALARM parameter list but are NOT shown on the
+   * original 参数设置 screen (播报位置 / 声音模式 / 延迟时间 / 间隔时间 / 光线感应器 /
+   * 暂停方式 / 播报内容 / 内部计数). They are still read, preserved and written back verbatim
+   * so importing or editing a task never loses data.
+   */
+  val HIDDEN_INDICES: Set<Int> = setOf(2, 3, 4, 5, 17, 19, 20, 22, 23)
 
   /** Defaults from GSW/AddinTimer/ad.<init>(). */
   val DEFAULTS: List<String> = listOf(
@@ -170,6 +175,9 @@ class AtkItem {
   var base: MutableList<String> = defaultBase().toMutableList()
   var rule: Rule = Rule()
   var act: MutableList<String> = ArrayList()
+  /** Original text kept for diagnostics; a damaged row is never silently rewritten. */
+  var rawParam: String = ""
+  var parseError: String = ""
 
   var name: String
     get() = base[2]
@@ -236,9 +244,9 @@ class AtkItem {
   fun moveToPage(index: Int) { page = 100 + index.coerceIn(0, 3) }
 
   /** "[按周] 一,二,三,四,五" style second line used by the original list rows. */
-  fun summary(): String {
+  fun summary(): String = try {
     val r = rule
-    return when (r.mode) {
+    when (r.mode) {
       Rule.MODE_WEEK -> {
         val days = parseIndexList(r.weekdays).sorted()
           .joinToString(",") { AtkOptions.WEEK_SHORT[it.coerceIn(0, 6)] }
@@ -260,6 +268,8 @@ class AtkItem {
       )
       else -> ""
     }
+  } catch (e: Exception) {
+    ""
   }
 
   fun param(): String {
@@ -306,21 +316,34 @@ class AtkItem {
       "0",   // 13 R 执行后动作 (bu.R)
     )
 
-    private val BAR = java.util.regex.Pattern.compile("\\|", java.util.regex.Pattern.LITERAL)
-    private val DOLLAR = java.util.regex.Pattern.compile("\\$", java.util.regex.Pattern.LITERAL)
+    // Pattern.quote is essential: Pattern.LITERAL + "\\|" matches a literal backslash
+    // followed by '|', NOT '|'. That mistake silently corrupted every saved/imported row.
+    private val BAR = java.util.regex.Pattern.compile(java.util.regex.Pattern.quote("|"))
+    private val DOLLAR = java.util.regex.Pattern.compile(java.util.regex.Pattern.quote("$"))
 
     /** Java-style split with limit=-1: trailing empty fields are preserved (lossless round-trip). */
     fun parse(id: Long, raw: String): AtkItem {
       val it = AtkItem()
       it.id = id
-      val seg = BAR.split(raw, -1)
-      it.kind = if (seg.isNotEmpty()) seg[0] else "ALARM"
-      val b: Array<String> = if (seg.size > 1) DOLLAR.split(seg[1], -1) else emptyArray<String>()
-      val fields = ArrayList<String>(14)
-      for (i in 0 until 14) fields.add(if (i < b.size) b[i] else defaultBase()[i])
-      it.base = fields
-      it.rule = Rule.parse(fields[5])
-      for (i in 2 until seg.size) it.act.add(seg[i])
+      it.rawParam = raw
+      try {
+        val seg = BAR.split(raw, -1)
+        it.kind = if (seg.isNotEmpty() && seg[0].isNotEmpty()) seg[0] else "ALARM"
+        val b: Array<String> = if (seg.size > 1) DOLLAR.split(seg[1], -1) else emptyArray<String>()
+        val fields = ArrayList<String>(14)
+        for (i in 0 until 14) fields.add(if (i < b.size) b[i] else defaultBase()[i])
+        it.base = fields
+        it.rule = Rule.parse(fields[5])
+        for (i in 2 until seg.size) it.act.add(seg[i])
+      } catch (e: Exception) {
+        // One damaged row must never take down the whole app on startup.
+        it.parseError = e.message ?: "unknown parse error"
+        it.kind = "ALARM"
+        it.base = defaultBase().toMutableList()
+        it.base[2] = "(数据损坏)"
+        it.rule = Rule()
+        it.act = ArrayList()
+      }
       if (it.kind == "ALARM") it.ensureAlarmAct()
       return it
     }
@@ -329,11 +352,13 @@ class AtkItem {
      * New item from the 提醒管理 group.
      * 0 = 定时提醒 (weekly), 1 = 快速提醒 (one shot), 2 = 整点报时 (hourly).
      */
-    fun newAlarm(preset: Int = 0): AtkItem {
+    fun newAlarm(preset: Int = 0, page: Int = 0): AtkItem {
       val it = AtkItem()
       it.kind = "ALARM"
       it.hour = 8
       it.minute = 0
+      // A new timer belongs to the tab it was created from (original behaviour).
+      it.moveToPage(page)
       val r = Rule()
       it.rule = r
       when (preset) {

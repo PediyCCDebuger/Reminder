@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -546,25 +547,33 @@ fun AtkContextMenu(entries: List<String>, onPick: (Int) -> Unit, onDismiss: () -
   }
 }
 
-/** System menu: light 2x4 grid sliding up from the bottom. */
+/**
+ * System menu: light 2x4 grid. The whole overlay is inset above the system navigation bar;
+ * without navigationBarsPadding the second row of labels lands underneath the 3-button bar.
+ */
 @Composable
 fun AtkSystemMenu(onPick: (Int) -> Unit, onDismiss: () -> Unit) {
   val names = listOf(
     "新增任务", "系统设置", "管理标签", "备份恢复",
     "分享好友", "检查更新", "建议反馈", "关于软件",
   )
+  // Use the app's own vectors: framework drawables are not guaranteed on every OEM ROM.
   val icons = listOf(
-    android.R.drawable.ic_menu_add,
-    android.R.drawable.ic_menu_manage,
-    android.R.drawable.ic_menu_agenda,
-    android.R.drawable.ic_menu_save,
-    android.R.drawable.ic_menu_share,
-    android.R.drawable.ic_menu_revert,
-    android.R.drawable.ic_menu_edit,
-    android.R.drawable.ic_menu_info_details,
+    com.lentikr.reminder.R.drawable.ic_add,
+    com.lentikr.reminder.R.drawable.ic_settings,
+    com.lentikr.reminder.R.drawable.ic_calendar_month,
+    com.lentikr.reminder.R.drawable.ic_restore_page,
+    com.lentikr.reminder.R.drawable.ic_share,
+    com.lentikr.reminder.R.drawable.ic_event_repeat,
+    com.lentikr.reminder.R.drawable.ic_edit,
+    com.lentikr.reminder.R.drawable.ic_info,
   )
   Box(
-    Modifier.fillMaxSize().background(Color(0x99000000)).clickable(onClick = onDismiss),
+    Modifier
+      .fillMaxSize()
+      .background(Color(0x99000000))
+      .clickable(onClick = onDismiss)
+      .navigationBarsPadding(),
     contentAlignment = Alignment.BottomCenter,
   ) {
     Column(
@@ -572,14 +581,14 @@ fun AtkSystemMenu(onPick: (Int) -> Unit, onDismiss: () -> Unit) {
         .fillMaxWidth()
         .background(Color(0xFFF0F0F0))
         .clickable(enabled = false, onClick = {})
-        .padding(vertical = 10.dp),
+        .padding(top = 10.dp, bottom = 14.dp),
     ) {
       for (row in 0..1) {
-        Row(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
           for (col in 0..3) {
             val i = row * 4 + col
             Column(
-              Modifier.weight(1f).height(80.dp).clickable { onPick(i) },
+              Modifier.weight(1f).height(74.dp).clickable { onPick(i) },
               horizontalAlignment = Alignment.CenterHorizontally,
               verticalArrangement = Arrangement.Center,
             ) {
@@ -587,10 +596,10 @@ fun AtkSystemMenu(onPick: (Int) -> Unit, onDismiss: () -> Unit) {
                 painter = painterResource(icons[i]),
                 contentDescription = names[i],
                 colorFilter = ColorFilter.tint(Color(0xFF777777)),
-                modifier = Modifier.size(32.dp),
+                modifier = Modifier.size(30.dp),
               )
-              Spacer(Modifier.height(6.dp))
-              Text(names[i], color = Color(0xFF222222), fontSize = 13.sp)
+              Spacer(Modifier.height(4.dp))
+              Text(names[i], color = Color(0xFF222222), fontSize = 13.sp, maxLines = 1)
             }
           }
         }

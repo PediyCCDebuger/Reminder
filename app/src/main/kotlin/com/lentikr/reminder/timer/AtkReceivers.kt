@@ -69,6 +69,7 @@ class AtkReceiver : BroadcastReceiver() {
           engine.showNotification(item)
           store.log(id, 1, item.name)
           engine.schedule(item)
+          engine.refreshNext()
         }
       }
 
@@ -189,7 +190,7 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
         verticalAlignment = Alignment.CenterVertically,
       ) {
         Image(
-          painter = painterResource(android.R.drawable.ic_lock_idle_alarm),
+          painter = painterResource(com.lentikr.reminder.R.drawable.ic_atk_stat),
           contentDescription = null,
           colorFilter = ColorFilter.tint(AtkSkin.green),
           modifier = Modifier.size(24.dp),

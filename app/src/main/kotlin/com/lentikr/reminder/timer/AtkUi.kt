@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -31,6 +30,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import cn.nnci.addintimer.Occurrence
+import com.lentikr.reminder.R
 import java.text.SimpleDateFormat
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -75,7 +76,7 @@ fun TimerApp() {
     var tab by remember { mutableIntStateOf(0) }
     var editingId by remember { mutableStateOf(-1L) }
     var preset by remember { mutableIntStateOf(0) }
-    var timerList by remember { mutableStateOf(store.all()) }
+    var timerList by remember { mutableStateOf(emptyList<AtkItem>()) }
     var message by remember { mutableStateOf("") }
     var newTaskOpen by remember { mutableStateOf(false) }
     var systemMenuOpen by remember { mutableStateOf(false) }
@@ -89,11 +90,30 @@ fun TimerApp() {
     var moveItem by remember { mutableStateOf<AtkItem?>(null) }
 
     fun refresh() {
-      timerList = store.all()
-      engine.rescheduleAll()
+      timerList = try { store.all() } catch (e: Exception) { emptyList() }
+      try { engine.rescheduleAll() } catch (e: Exception) { }
     }
 
-    BackHandler(enabled = screen != Screen.LIST) { screen = Screen.LIST }
+    // First install: the original AddinTimer ships 18 sample timers. Also republish the
+    // "最近的一次任务" notification on every launch / boot so the status-bar icon stays.
+    LaunchedEffect(Unit) {
+      try {
+        if (!prefs.getBoolean("samples_seeded", false)) {
+          store.seedSamples()
+          prefs.edit().putBoolean("samples_seeded", true).apply()
+        }
+        timerList = store.all()
+        engine.rescheduleAll()
+      } catch (e: Exception) {
+        timerList = emptyList()
+      }
+    }
+
+    BackHandler(enabled = screen != Screen.LIST) {
+      screen = Screen.LIST
+      // Picking 通知栏图标 in 系统设置 takes effect as soon as we return to the list.
+      try { engine.rescheduleAll() } catch (e: Exception) { }
+    }
 
     val openImport = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
       if (uri != null) importUri = uri
@@ -140,7 +160,13 @@ fun TimerApp() {
         Screen.EDIT -> AtkEditScreen(
           item = if (editingId >= 0) store.get(editingId) else null,
           preset = preset,
-          onSave = { item -> store.save(item); refresh(); screen = Screen.LIST },
+          page = tab,
+          onSave = { item ->
+            tab = item.pageIndex()
+            store.save(item)
+            refresh()
+            screen = Screen.LIST
+          },
           onClose = { screen = Screen.LIST },
           onMessage = { message = it },
         )
@@ -175,11 +201,11 @@ fun TimerApp() {
             4 -> {
               val send = Intent(Intent.ACTION_SEND).apply {
                 type = "text/plain"
-                putExtra(Intent.EXTRA_TEXT, "AddinTimer 复刻版：导入旧版 .atk 备份即可继续使用原来的定时任务。")
+                putExtra(Intent.EXTRA_TEXT, "Reminder：导入旧版 AddinTimer 的 .atk 备份即可继续使用原来的定时任务。")
               }
               try { context.startActivity(Intent.createChooser(send, "分享好友")) } catch (e: Exception) { }
             }
-            5 -> message = "当前已是最新版本（2.2.0），无需更新。"
+            5 -> message = "当前已是最新版本（2.3.0），无需更新。"
             6 -> {
               try {
                 context.startActivity(
@@ -215,6 +241,16 @@ fun TimerApp() {
       AtkBackupDialog(
         onBackup = { backupOpen = false; export() },
         onRestore = { backupOpen = false; openImport.launch(arrayOf("*/*")) },
+        onSamples = {
+          backupOpen = false
+          try {
+            store.seedSamples(replace = true)
+            refresh()
+            toast(context, "已载入 ${AtkSamples.PARAMS.size} 条原版示例任务")
+          } catch (e: Exception) {
+            message = "载入失败：" + e.message
+          }
+        },
         onDismiss = { backupOpen = false },
       )
     }
@@ -228,7 +264,11 @@ fun TimerApp() {
           try {
             val n = store.importAtk(uri, which == 0)
             refresh()
-            toast(context, if (which == 0) "已恢复 $n 条" else "已追加 $n 条")
+            toast(
+              context,
+              (if (which == 0) "已恢复 $n 条" else "已追加 $n 条") +
+                "；已解除激活数量上限，提醒类任务全部启用",
+            )
           } catch (e: Exception) {
             message = "恢复失败：" + e.message
           }
@@ -284,7 +324,11 @@ fun TimerApp() {
     }
 
     planItem?.let { item ->
-      val times = Occurrence.next(item.rule, item.hour, item.minute, LocalDateTime.now(), 10)
+      val times = try {
+        Occurrence.next(item.rule, item.hour, item.minute, LocalDateTime.now(), 10)
+      } catch (e: Exception) {
+        emptyList<LocalDateTime>()
+      }
       val body = if (times.isEmpty()) {
         "当前规则没有匹配的日期，请检查「执行策略」的具体设置。"
       } else {
@@ -299,7 +343,7 @@ fun TimerApp() {
     }
 
     logItem?.let { item ->
-      val lines = store.logs(item.id)
+      val lines = try { store.logs(item.id) } catch (e: Exception) { emptyList<String>() }
       AtkMessageDialog(
         title = "查看日志 · ${item.name}",
         body = if (lines.isEmpty()) "暂无执行日志" else lines.joinToString("\n"),
@@ -325,12 +369,15 @@ fun TimerApp() {
     }
 
     if (aboutOpen) {
+      val crash = AtkCrash.last(context)
       AtkMessageDialog(
         title = "关于软件",
-        body = "AddinTimer 复刻版 2.2.0\n" +
-          "界面与数据格式对齐 AddinTimer 2.1G：可导入原版 .atk 备份，保留 28 项时间规则与 27 项提醒参数。\n" +
-          "仅保留「提醒管理」（定时提醒 / 快速提醒 / 整点报时）。\n" +
-          "Android 12+ 请在「系统设置 → 服务状态」里完成精确闹钟、通知、电池优化与全屏通知授权。",
+        body = "Reminder 2.3.0 · AddinTimer 定时部分复刻版\n" +
+          "数据格式与 AddinTimer 2.1G 完全一致，可导入 / 导出 .atk 备份。\n" +
+          "已去除原版未注册版的激活数量上限，任意多条提醒可同时启用。\n" +
+          "首次启动载入 18 条原版示例任务；参数设置以原版截图为准。\n" +
+          "Android 12+ 请在「系统设置 → 服务状态」完成精确闹钟、通知、电池优化与全屏通知授权。" +
+          (if (crash.isNotBlank()) "\n\n最近一次崩溃日志：\n$crash" else ""),
         onDismiss = { aboutOpen = false },
       )
     }
@@ -356,7 +403,7 @@ private fun MainScreen(
   onToggle: (Long, Boolean) -> Unit,
 ) {
   Column(Modifier.fillMaxSize()) {
-    AtkTitleBar("AddinTimer", suffix = "(高级版)", onMenu = onMenu)
+    AtkTitleBar("Reminder", onMenu = onMenu)
     Spacer(Modifier.height(4.dp))
     AtkBlueButton("新增任务", onNew)
     Spacer(Modifier.height(4.dp))
@@ -365,7 +412,11 @@ private fun MainScreen(
       items(visible, key = { it.id }) { item ->
         AtkTimerRow(
           item = item,
-          next = if (item.enabled) engine.nextMillis(item) else 0L,
+          next = if (item.enabled) {
+            try { engine.nextMillis(item) } catch (e: Exception) { 0L }
+          } else {
+            0L
+          },
           onClick = { onEdit(item.id) },
           onLongClick = { onLongClick(item) },
           onToggle = { on -> onToggle(item.id, on) },
@@ -413,7 +464,7 @@ private fun AtkTimerRow(
       verticalAlignment = Alignment.CenterVertically,
     ) {
       Image(
-        painter = painterResource(android.R.drawable.ic_lock_idle_alarm),
+        painter = painterResource(R.drawable.ic_atk_stat),
         contentDescription = null,
         colorFilter = ColorFilter.tint(
           if (item.enabled) AtkSkin.green else Color(0xFF9A9A9A),
@@ -568,7 +619,8 @@ private fun SettingsScreen(
       }
       item {
         Text(
-          "「服务状态」可打开新系统所需的权限自检（精确闹钟 / 通知 / 电池优化 / 全屏通知）。",
+          "「服务状态」可打开新系统所需的权限自检（精确闹钟 / 通知 / 电池优化 / 全屏通知）。" +
+            "通知栏图标设为「不显示」时，下拉里的「下一次任务」通知会被隐藏。",
           color = AtkSkin.sectionText,
           fontSize = 13.sp,
           modifier = Modifier.padding(12.dp),
@@ -612,9 +664,14 @@ private fun TagsScreen(onBack: () -> Unit, onPick: (Int) -> Unit) {
   }
 }
 
-/** 备份恢复 dialog: black caption, two white entries, grey cancel. */
+/** 备份恢复 dialog: black caption, white entries, grey cancel. */
 @Composable
-private fun AtkBackupDialog(onBackup: () -> Unit, onRestore: () -> Unit, onDismiss: () -> Unit) {
+private fun AtkBackupDialog(
+  onBackup: () -> Unit,
+  onRestore: () -> Unit,
+  onSamples: () -> Unit,
+  onDismiss: () -> Unit,
+) {
   Dialog(onDismissRequest = onDismiss) {
     Column(Modifier.fillMaxWidth().background(Color(0xFFF5F5F5))) {
       Box(
@@ -626,19 +683,11 @@ private fun AtkBackupDialog(onBackup: () -> Unit, onRestore: () -> Unit, onDismi
           modifier = Modifier.padding(horizontal = 16.dp),
         )
       }
-      Box(
-        Modifier.fillMaxWidth().height(64.dp).background(Color.White).clickable(onClick = onBackup),
-        contentAlignment = Alignment.CenterStart,
-      ) {
-        Text("备份环境", color = Color.Black, fontSize = 19.sp, modifier = Modifier.padding(horizontal = 20.dp))
-      }
+      BackupEntry("备份环境", onBackup)
       AtkLightDivider()
-      Box(
-        Modifier.fillMaxWidth().height(64.dp).background(Color.White).clickable(onClick = onRestore),
-        contentAlignment = Alignment.CenterStart,
-      ) {
-        Text("恢复环境", color = Color.Black, fontSize = 19.sp, modifier = Modifier.padding(horizontal = 20.dp))
-      }
+      BackupEntry("恢复环境", onRestore)
+      AtkLightDivider()
+      BackupEntry("载入原版示例任务", onSamples)
       Box(
         Modifier.fillMaxWidth().background(Color(0xFFD2D2D2)).padding(10.dp),
         contentAlignment = Alignment.Center,
@@ -646,6 +695,16 @@ private fun AtkBackupDialog(onBackup: () -> Unit, onRestore: () -> Unit, onDismi
         AtkPlainButton("取消", Modifier.width(180.dp), onDismiss)
       }
     }
+  }
+}
+
+@Composable
+private fun BackupEntry(text: String, onClick: () -> Unit) {
+  Box(
+    Modifier.fillMaxWidth().height(64.dp).background(Color.White).clickable(onClick = onClick),
+    contentAlignment = Alignment.CenterStart,
+  ) {
+    Text(text, color = Color.Black, fontSize = 19.sp, modifier = Modifier.padding(horizontal = 20.dp))
   }
 }
 

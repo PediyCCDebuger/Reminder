@@ -60,12 +60,13 @@ private data class InputState(
 fun AtkEditScreen(
   item: AtkItem?,
   preset: Int = 0,
+  page: Int = 0,
   onSave: (AtkItem) -> Unit,
   onClose: () -> Unit,
   onMessage: (String) -> Unit,
 ) {
-  val draft = remember(item?.id, preset) {
-    if (item != null) AtkItem.parse(item.id, item.param()) else AtkItem.newAlarm(preset)
+  val draft = remember(item?.id, preset, page) {
+    if (item != null) AtkItem.parse(item.id, item.param()) else AtkItem.newAlarm(preset, page)
   }
   var tab by remember { mutableIntStateOf(0) }
   var revision by remember { mutableIntStateOf(0) }
@@ -77,7 +78,7 @@ fun AtkEditScreen(
       .fillMaxSize()
       .background(AtkSkin.bg),
   ) {
-    AtkTitleBar("定时提醒")
+    AtkTitleBar(if (draft.kind == "ALARM") "定时提醒" else draft.kindLabel())
     Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)) {
       AtkTabButton("◐", "时间设置", tab == 0, { tab = 0 }, Modifier.weight(1f))
       Spacer(Modifier.width(6.dp))
@@ -395,7 +396,7 @@ private fun ParamTab(draft: AtkItem, change: (() -> Unit) -> Unit, onMessage: (S
             }
           }
           FieldKind.TEXT -> {
-            AtkSpinnerRow(spec.label, raw.ifBlank { "缺省铃音" }) {
+            AtkSpinnerRow(spec.label, raw.ifBlank { if (spec.index == 7) "缺省铃音" else "(空)" }) {
               if (spec.index == 7) {
                 pathChoice = true
               } else {

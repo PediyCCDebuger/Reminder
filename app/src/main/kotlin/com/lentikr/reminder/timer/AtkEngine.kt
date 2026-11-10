@@ -12,11 +12,12 @@ import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import cn.nnci.addintimer.Occurrence
+import com.lentikr.reminder.R
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
-/** Exact alarms, notification channel and runtime-permission diagnosis. */
+/** Exact alarms, notification channels, status-bar icon and permission diagnosis. */
 class AtkEngine(private val context: Context) {
 
   private val store = AtkStore(context)
@@ -31,15 +32,18 @@ class AtkEngine(private val context: Context) {
     const val EXTRA_ID = "timerid"
     const val EXTRA_AT = "triggerAt"
     const val CHANNEL = "addintimer_alarm"
+    private const val CHANNEL_NEXT = "addintimer_next"
+    private const val NEXT_ID = 900001
     private val FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm (E)")
 
-    fun toMillis(t: LocalDateTime): Long = t.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+    fun toMillis(t: LocalDateTime): Long =
+      t.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
   }
 
   fun ensureChannel() {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       val channel = NotificationChannel(CHANNEL, "定时提醒", NotificationManager.IMPORTANCE_HIGH).apply {
-        description = "AddinTimer 兼容定时提醒"
+        description = "定时提醒"
         enableVibration(true)
         setSound(Settings.System.DEFAULT_ALARM_ALERT_URI, Notification.AUDIO_ATTRIBUTES_DEFAULT)
         lockscreenVisibility = Notification.VISIBILITY_PUBLIC
@@ -69,34 +73,50 @@ class AtkEngine(private val context: Context) {
     )
   }
 
-  /** Next fire time in epoch millis, or 0 when the rule yields nothing. */
+  /** Next fire time in epoch millis, or 0 when the rule yields nothing. Never throws. */
   fun nextMillis(item: AtkItem, after: LocalDateTime = LocalDateTime.now()): Long {
-    val r = item.rule
-    val first = Occurrence.first(r, item.hour, item.minute, after) ?: return 0L
-    var t = first
-    // 时循环: within the firing day, repeat every N minutes until 结束时间.
-    if (item.hourLoop != 0 && item.loopMinutes > 0 && r.mode != 4) {
-      val endMinutes = item.loopEndH * 60 + item.loopEndM
-      val startMinutes = item.hour * 60 + item.minute
-      val step = item.loopMinutes
-      val nowMinutes = after.hour * 60 + after.minute
-      if (endMinutes > startMinutes && after.toLocalDate() == t.toLocalDate()) {
-        var m = startMinutes
-        while (m < nowMinutes) m += step
-        if (m <= endMinutes) {
-          t = t.withHour(m / 60).withMinute(m % 60).withSecond(0)
-          if (!t.isAfter(after)) return toMillis(t.plusMinutes(step.toLong()))
+    try {
+      val r = item.rule
+      var t = Occurrence.first(r, item.hour, item.minute, after) ?: return 0L
+      // 时循环: within the firing day, repeat every N minutes until 结束时间.
+      if (item.hourLoop != 0 && item.loopMinutes > 0 && r.mode != 4) {
+        val endMinutes = item.loopEndH * 60 + item.loopEndM
+        val startMinutes = item.hour * 60 + item.minute
+        val step = item.loopMinutes
+        val nowMinutes = after.hour * 60 + after.minute
+        if (endMinutes > startMinutes && step > 0 && after.toLocalDate() == t.toLocalDate()) {
+          var m = startMinutes
+          while (m < nowMinutes) m += step
+          if (m in startMinutes..endMinutes) {
+            t = t.withHour((m / 60).coerceIn(0, 23))
+              .withMinute((m % 60).coerceIn(0, 59))
+              .withSecond(0)
+            if (!t.isAfter(after)) return toMillis(t.plusMinutes(step.toLong()))
+          }
         }
       }
+      return toMillis(t)
+    } catch (e: Exception) {
+      return 0L
     }
-    return toMillis(t)
   }
 
   fun nextText(item: AtkItem): String {
-    if (!item.enabled) return "已停用"
-    val ms = nextMillis(item)
-    if (ms <= 0) return "无匹配日期"
-    return LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(ms), ZoneId.systemDefault()).format(FMT)
+    return try {
+      if (!item.enabled) {
+        "已停用"
+      } else {
+        val ms = nextMillis(item)
+        if (ms <= 0) {
+          "无匹配日期"
+        } else {
+          LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(ms), ZoneId.systemDefault())
+            .format(FMT)
+        }
+      }
+    } catch (e: Exception) {
+      "无匹配日期"
+    }
   }
 
   fun schedule(item: AtkItem) {
@@ -129,11 +149,17 @@ class AtkEngine(private val context: Context) {
 
   fun cancel(id: Long) = alarms.cancel(fireIntent(id))
 
+  /** Refresh only the persistent "下一次任务" notification, e.g. right after an alarm fires. */
+  fun refreshNext() {
+    try { showNextNotification(store.all()) } catch (e: Exception) { }
+  }
+
   fun rescheduleAll() {
-    for (item in store.all()) {
-      schedule(item)
-      if (item.enabled) item.nextMs = nextMillis(item)
+    val items = try { store.all() } catch (e: Exception) { emptyList() }
+    for (item in items) {
+      try { schedule(item) } catch (e: Exception) { }
     }
+    try { showNextNotification(items) } catch (e: Exception) { }
   }
 
   fun showNotification(item: AtkItem) {
@@ -161,7 +187,7 @@ class AtkEngine(private val context: Context) {
       @Suppress("DEPRECATION") Notification.Builder(context)
     }
     val n = builder
-      .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+      .setSmallIcon(R.drawable.ic_atk_stat)
       .setContentTitle(title)
       .setContentText(body)
       .setStyle(Notification.BigTextStyle().bigText(body))
@@ -172,14 +198,98 @@ class AtkEngine(private val context: Context) {
       .setFullScreenIntent(full, true)
       .setSound(Settings.System.DEFAULT_ALARM_ALERT_URI, Notification.AUDIO_ATTRIBUTES_DEFAULT)
       .setVibrate(longArrayOf(0, 400, 300, 400))
-      .addAction(android.R.drawable.ic_media_play, "贪睡 10 分钟", snooze)
-      .addAction(android.R.drawable.ic_menu_close_clear_cancel, "终止提醒", stop)
+      .addAction(R.drawable.ic_atk_stat, "贪睡 10 分钟", snooze)
+      .addAction(R.drawable.ic_atk_stat, "终止提醒", stop)
       .build()
     try {
       notifications.notify(item.id.toInt(), n)
     } catch (e: SecurityException) {
       // POST_NOTIFICATIONS not granted; the full-screen activity still tries to show.
     }
+  }
+
+  /**
+   * The original app keeps a small status-bar icon and a persistent notification showing the
+   * most recent (i.e. next) task, e.g. 「早起床 - [明天 06:30]」. Silent low-priority channel
+   * so it never competes with the actual alarm notification.
+   */
+  fun showNextNotification(items: List<AtkItem>) {
+    val iconPref = try {
+      context.getSharedPreferences("atk_settings", Context.MODE_PRIVATE)
+        .getString("notify_icon", "应用程序图标")
+    } catch (e: Exception) {
+      "应用程序图标"
+    }
+    if (iconPref == "不显示") {
+      try { notifications.cancel(NEXT_ID) } catch (e: Exception) { }
+      return
+    }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      val channel = NotificationChannel(
+        CHANNEL_NEXT, "下次提醒", NotificationManager.IMPORTANCE_LOW,
+      ).apply {
+        description = "显示最近的一次定时任务"
+        setSound(null, null)
+        enableVibration(false)
+        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+      }
+      notifications.createNotificationChannel(channel)
+    }
+    val now = System.currentTimeMillis()
+    var best: AtkItem? = null
+    var bestAt = Long.MAX_VALUE
+    for (item in items) {
+      if (!item.enabled) continue
+      val at = try { nextMillis(item) } catch (e: Exception) { 0L }
+      if (at > now && at < bestAt) {
+        bestAt = at
+        best = item
+      }
+    }
+    val item = best
+    if (item == null) {
+      try { notifications.cancel(NEXT_ID) } catch (e: Exception) { }
+      return
+    }
+    val whenText = try {
+      val dayFmt = java.text.SimpleDateFormat("yyyyMMdd", java.util.Locale.CHINA)
+      val hmFmt = java.text.SimpleDateFormat("HH:mm", java.util.Locale.CHINA)
+      val today = dayFmt.format(java.util.Date(now))
+      val thatDay = dayFmt.format(java.util.Date(bestAt))
+      val tomorrow = dayFmt.format(java.util.Date(now + 24L * 60 * 60 * 1000))
+      val hm = hmFmt.format(java.util.Date(bestAt))
+      when (thatDay) {
+        today -> "今天 $hm"
+        tomorrow -> "明天 $hm"
+        else -> java.text.SimpleDateFormat("M月d日", java.util.Locale.CHINA)
+          .format(java.util.Date(bestAt)) + " $hm"
+      }
+    } catch (e: Exception) {
+      ""
+    }
+    val open = PendingIntent.getActivity(
+      context, NEXT_ID,
+      Intent(context, com.lentikr.reminder.MainActivity::class.java)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+    val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      Notification.Builder(context, CHANNEL_NEXT)
+    } else {
+      @Suppress("DEPRECATION") Notification.Builder(context)
+    }
+    val n = builder
+      .setSmallIcon(R.drawable.ic_atk_stat)
+      .setContentTitle(context.getString(R.string.app_name))
+      .setContentText(item.name.ifBlank { "定时提醒" } + " - [$whenText]")
+      .setContentIntent(open)
+      .setAutoCancel(false)
+      .setOngoing(false)
+      .setOnlyAlertOnce(true)
+      .setPriority(Notification.PRIORITY_LOW)
+      .setCategory(Notification.CATEGORY_REMINDER)
+      .build()
+    try { notifications.notify(NEXT_ID, n) } catch (e: SecurityException) { }
   }
 
   fun dismiss(id: Long) = notifications.cancel(id.toInt())
