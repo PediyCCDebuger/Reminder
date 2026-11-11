@@ -46,10 +46,12 @@
             </intent-filter>
         </activity>
 
-        <!-- Full-screen alarm surface shown by the high-priority notification. -->
+        <!-- Full-screen alarm surface shown by the high-priority notification. exported=true:
+             SystemUI launches this across processes through the full-screen intent, and some
+             ROMs refuse an unexported Activity there. The Activity itself validates EXTRA_ID. -->
         <activity
             android:name=".timer.AtkAlarmActivity"
-            android:exported="false"
+            android:exported="true"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
             android:launchMode="singleTop"
@@ -67,10 +69,11 @@
             </intent-filter>
         </receiver>
 
-        <!-- Keeps a firing alarm ringing while the screen is locked: hold a wake lock, play the
-             configured tone and keep the full-screen notification up until 终止 / 贪睡.
-             mediaPlayback is the honest type (we are playing audio); specialUse stays declared
-             as the fallback for ROMs that reject the combination. -->
+        <!-- Keeps a firing alarm ringing while the screen is locked: hold a wake lock and play
+             the configured tone until 终止 / 贪睡. specialUse is the PRIMARY type (SunriseAlarm
+             uses it and works on OnePlus/ColorOS); mediaPlayback stays declared as a fallback
+             because Android 14+ tears down a mediaPlayback FGS with no visible MediaSession
+             after ~1s — that kill was the "svc: onDestroy（前台=true）" in the 2.8.0 log. -->
         <service
             android:name=".timer.AtkAlarmService"
             android:exported="false"

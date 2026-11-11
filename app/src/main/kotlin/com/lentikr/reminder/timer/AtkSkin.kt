@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
@@ -298,7 +299,12 @@ private fun AtkActionButton(
   }
 }
 
-/** Classic single-choice spinner popup (dark caption, white list, grey cancel). */
+/**
+ * Classic single-choice spinner popup, matching AddinTimer 2.1G: black caption, white list,
+ * an outlined radio circle on EVERY row with a green filled dot on the selected one, and a grey
+ * cancel strip. (3.0.0: the previous build drew a blue caption, a light-blue highlight and a
+ * small blue text dot — none of which exists in the original.)
+ */
 @Composable
 fun AtkChoiceDialog(
   title: String,
@@ -308,27 +314,81 @@ fun AtkChoiceDialog(
   onDismiss: () -> Unit,
 ) {
   Dialog(onDismissRequest = onDismiss) {
-    Column(Modifier.fillMaxWidth().background(AtkSkin.lightPanel)) {
+    Column(Modifier.fillMaxWidth().background(Color.White)) {
       AtkDialogTitle(title)
       LazyColumn(Modifier.fillMaxWidth().heightIn(max = 430.dp)) {
         itemsIndexed(options) { index, option ->
-          Box(
+          Row(
             Modifier
               .fillMaxWidth()
-              .heightIn(min = 48.dp)
-              .background(
-                if (index == selected) Color(0xFFDCEBFA) else Color.White,
-              )
+              .heightIn(min = 56.dp)
+              .background(Color.White)
               .clickable { onPick(index) }
-              .padding(horizontal = 16.dp, vertical = 12.dp),
-            contentAlignment = Alignment.CenterStart,
+              .padding(horizontal = 18.dp),
+            verticalAlignment = Alignment.CenterVertically,
           ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-              Text(option, color = Color.Black, fontSize = 17.sp, modifier = Modifier.weight(1f))
-              if (index == selected) Text("●", color = AtkSkin.blue, fontSize = 12.sp)
+            Text(
+              option,
+              color = Color.Black,
+              fontSize = 18.sp,
+              modifier = Modifier.weight(1f),
+            )
+            // Outlined radio circle on every row (not just the selected one); the selected
+            // row gets the original's green filled dot inside it.
+            Box(
+              Modifier
+                .size(24.dp)
+                .border(2.dp, Color(0xFF9E9E9E), CircleShape),
+              contentAlignment = Alignment.Center,
+            ) {
+              if (index == selected) {
+                Box(Modifier.size(13.dp).background(AtkSkin.green, CircleShape))
+              }
             }
           }
           AtkLightDivider()
+        }
+      }
+      AtkDialogCancel(onDismiss)
+    }
+  }
+}
+
+/**
+ * 修改图标 picker for 管理标签: black caption, white emoji grid, grey cancel — the same
+ * classic window style as [AtkChoiceDialog].
+ */
+@Composable
+fun AtkIconPickerDialog(
+  current: String,
+  onPick: (String) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  Dialog(onDismissRequest = onDismiss) {
+    Column(Modifier.fillMaxWidth().background(Color.White)) {
+      AtkDialogTitle("修改图标")
+      Column(Modifier.fillMaxWidth().padding(10.dp)) {
+        AtkTags.ICONS.chunked(5).forEach { row ->
+          Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+            row.forEach { icon ->
+              Box(
+                Modifier
+                  .padding(4.dp)
+                  .size(54.dp)
+                  .clip(RoundedCornerShape(4.dp))
+                  .border(
+                    2.dp,
+                    if (icon == current) AtkSkin.green else Color(0xFFE0E0E0),
+                    RoundedCornerShape(4.dp),
+                  )
+                  .background(if (icon == current) Color(0xFFF2FBE9) else Color.White)
+                  .clickable { onPick(icon) },
+                contentAlignment = Alignment.Center,
+              ) {
+                Text(icon, fontSize = 26.sp)
+              }
+            }
+          }
         }
       }
       AtkDialogCancel(onDismiss)
@@ -368,7 +428,7 @@ fun AtkMultiDialog(
               Modifier
                 .size(24.dp)
                 .border(2.dp, Color(0xFF888888), RoundedCornerShape(2.dp))
-                .background(if (index in temp) Color(0xFFDCEBFA) else Color.White),
+                .background(Color.White),
               contentAlignment = Alignment.Center,
             ) {
               if (index in temp) {
@@ -455,14 +515,15 @@ fun AtkMessageDialog(
   }
 }
 
+/** Original AddinTimer dialogs use a plain black caption strip with white regular-weight text. */
 @Composable
 fun AtkDialogTitle(text: String) {
   Box(
-    Modifier.fillMaxWidth().height(46.dp).background(AtkSkin.dialogBlue),
+    Modifier.fillMaxWidth().height(48.dp).background(Color(0xFF111111)),
     contentAlignment = Alignment.CenterStart,
   ) {
     Text(
-      text, color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold,
+      text, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Normal,
       modifier = Modifier.padding(horizontal = 16.dp),
     )
   }
@@ -498,13 +559,11 @@ fun AtkLightDivider() {
   Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFD8D8D8)))
 }
 
-/** Bottom tab strip: 常用 / 生活 / 纪念日 / 生日 (page 100..103). */
+/** Bottom tab strip: labels come from 管理标签 (editable names + icons, page 100 + index). */
 @Composable
-fun AtkTabBar(selected: Int, onSelect: (Int) -> Unit) {
-  val icons = listOf("\uD83C\uDF3C", "\u2602", "\uD83D\uDCC5", "\uD83C\uDF88")
-  val names = listOf("常用", "生活", "纪念日", "生日")
+fun AtkTabBar(selected: Int, onSelect: (Int) -> Unit, tags: List<AtkTag> = AtkTags.DEFAULT) {
   Row(Modifier.fillMaxWidth().height(56.dp).background(Color(0xFF0E0E0E))) {
-    names.forEachIndexed { i, name ->
+    tags.forEachIndexed { i, tag ->
       val on = i == selected
       Box(
         Modifier
@@ -516,15 +575,47 @@ fun AtkTabBar(selected: Int, onSelect: (Int) -> Unit) {
         contentAlignment = Alignment.Center,
       ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-          Text(icons[i], fontSize = 18.sp, color = if (on) Color.White else Color(0xFFBDBDBD))
+          Text(tag.icon, fontSize = 18.sp, color = if (on) Color.White else Color(0xFFBDBDBD))
           Spacer(Modifier.height(2.dp))
           Text(
-            name,
+            tag.name,
             fontSize = 13.sp,
             color = if (on) Color.White else Color(0xFFC8C8C8),
             fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
           )
         }
+      }
+    }
+  }
+}
+
+/**
+ * 管理标签 long-press menu: plain white panel, black left-aligned entries with hairline
+ * dividers (the original AddinTimer look, see 管理标签.png). Kept separate from the dark
+ * [AtkContextMenu] used on the task list.
+ */
+@Composable
+fun AtkLightContextMenu(
+  entries: List<String>,
+  onPick: (Int) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  Dialog(onDismissRequest = onDismiss) {
+    Column(Modifier.fillMaxWidth(0.78f).background(Color.White)) {
+      entries.forEachIndexed { index, entry ->
+        Box(
+          Modifier
+            .fillMaxWidth()
+            .heightIn(min = 58.dp)
+            .clickable { onPick(index) }
+            .padding(horizontal = 22.dp, vertical = 8.dp),
+          contentAlignment = Alignment.CenterStart,
+        ) {
+          Text(entry, color = Color.Black, fontSize = 19.sp)
+        }
+        if (index != entries.lastIndex) AtkLightDivider()
       }
     }
   }

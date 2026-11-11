@@ -22,8 +22,8 @@ keystore.properties
 *.jks
 *.keystore
 *.p12
-# The in-repo base64 keystore is a published fallback used only when no secret is set; never
-# let a local copy be (re)committed over it.
+# The local base64 keystore is the offline source for the GitHub Secrets upload; it is NOT
+# published and must never be committed. CI reads the key from repository secrets only.
 .github/signing/
 
 # Packages built outside build/, e.g. Android Studio's "Generate Signed APK" output in app/release/

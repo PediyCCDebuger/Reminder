@@ -11,11 +11,13 @@ import android.os.PowerManager
 /**
  * Keeps a firing alarm alive while the screen is locked.
  *
- * This service is the single fire entry point: the exact alarm's PendingIntent is created with
- * `PendingIntent.getForegroundService()` (see [AtkEngine.fireIntent]), so the system itself wakes
- * the app and grants the foreground-service start exemption that a background broadcast does not
- * reliably get on Android 12+. The broadcast path in [AtkReceiver] still exists for snooze and for
- * alarms armed by an older build, and simply delegates here.
+ * 3.0.0: the exact alarm's PendingIntent is a **broadcast** (see [AtkEngine.fireIntent]).
+ * [AtkReceiver] posts the full-screen notification itself and then starts this service purely
+ * to keep the process and the ringtone alive while the screen is locked. Starting a foreground
+ * service from the background can be refused on Android 12+, so the tone and the notification
+ * are already up before this service is asked to start — it is a fallback, not a gate.
+ * This service must never re-post the full-screen notification: doing so would re-trigger
+ * SystemUI's full-screen launch and loop Activity -> Service -> notify -> Activity.
  *
  * Failure modes are made visible instead of silent: every startForeground attempt, the sound
  * start, the activity launch and the re-arm are written to [AtkDiag] so 权限自检 → 诊断日志 can
@@ -89,7 +91,7 @@ class AtkAlarmService : Service() {
     // either component being torn down.
     AtkAlarmSound.play(this, item)
 
-    val foregrounded = enterForeground(engine, item, id.toInt())
+    val foregrounded = enterForeground(engine, item, id.toInt(), force)
     if (!foregrounded) {
       // Could not enter the foreground as a mediaPlayback service (rare). The tone is already
       // playing from the activity and a plain notification is posted below, so the alarm still
@@ -97,10 +99,10 @@ class AtkAlarmService : Service() {
       AtkDiag.log(this, "svc: 无法进入前台，改为普通通知 + 本进程播铃")
     }
 
-    // Post (or replace) the persistent alarm notification and re-arm the next occurrence. The
-    // 执行界面 is launched directly by setAlarmClock(), so this service must NOT start it again
-    // (doing so would loop through onNewIntent).
-    engine.showNotification(item)
+    // The receiver already posted the full-screen notification; re-posting it here could
+    // re-trigger SystemUI's full-screen launch and loop forever. startForeground (above) keeps
+    // the same notification id alive without a second notify().
+    // The surface is raised by SystemUI, so this service NEVER calls startActivity itself.
     runCatching { AtkStore(this).log(id, 1, item.name) }
     runCatching { engine.schedule(item) }
     runCatching { engine.refreshNext() }
@@ -141,24 +143,34 @@ class AtkAlarmService : Service() {
 
   /**
    * Android 14+ verifies the foreground service type against the manifest and the granted
-   * permissions, and a mismatch throws instead of degrading. Try the most accurate type first
-   * (mediaPlayback, because we really are playing audio), then specialUse, then the untyped
-   * pre-34 call.
+   * permissions, and a mismatch throws instead of degrading.
+   *
+   * 3.0.0: `mediaPlayback` is tried LAST. On OnePlus/ColorOS (Android 14+) a mediaPlayback FGS
+   * without an active, system-visible MediaSession is judged "type abuse" and the service is
+   * torn down about a second after startForeground — that kill took the ringtone with it, which
+   * is exactly what the 2.8.0 log `svc: onDestroy（前台=true）` showed. Both reference apps
+   * verified working on this device use `specialUse` (SunriseAlarm) / a plain started service
+   * (Smart Alarm), so specialUse is now the primary type.
    */
-  private fun enterForeground(engine: AtkEngine, item: AtkItem, notificationId: Int): Boolean {
-    val notification = runCatching { engine.buildAlarmNotification(item) }.getOrNull()
+  private fun enterForeground(
+    engine: AtkEngine,
+    item: AtkItem,
+    notificationId: Int,
+    force: Boolean,
+  ): Boolean {
+    val notification = runCatching { engine.buildAlarmNotification(item, force) }.getOrNull()
     if (notification == null) {
       AtkDiag.log(this, "svc: 通知构建失败")
       return false
     }
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
       val attempts = listOf(
+        "specialUse" to ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
         "mediaPlayback|specialUse" to (
           ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
           ),
         "mediaPlayback" to ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
-        "specialUse" to ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
       )
       for ((label, type) in attempts) {
         try {

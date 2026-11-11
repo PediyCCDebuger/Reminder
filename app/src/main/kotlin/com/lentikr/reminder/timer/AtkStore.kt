@@ -183,7 +183,7 @@ class AtkStore(private val context: Context) {
    * Returns the number of rows actually changed.
    */
   fun moveToPage(ids: Collection<Long>, page: Int): Int {
-    val value = (100 + page.coerceIn(0, 3)).toString()
+    val value = (100 + page.coerceIn(0, AtkTags.MAX - 1)).toString()
     val local = db()
     var changed = 0
     local.beginTransaction()
@@ -196,6 +196,40 @@ class AtkStore(private val context: Context) {
         if (next == raw) continue
         val v = ContentValues()
         v.put("param", next)
+        local.update("timer", v, "id = ?", arrayOf(id.toString()))
+        changed++
+      }
+      local.setTransactionSuccessful()
+    } finally {
+      local.endTransaction()
+    }
+    return changed
+  }
+
+  /**
+   * Rewrite base[1] on EVERY task through [mapping] (old page index -> new page index).
+   * Used by 管理标签 when a tag is deleted or moved so tasks stay attached to their label:
+   * delete index 2 shifts 3->2, swap 1<->3 swaps those two values, everything else unchanged.
+   * Only the page field is touched; all other bytes of the `.atk` param are preserved.
+   */
+  fun remapPages(mapping: Map<Int, Int>): Int {
+    if (mapping.isEmpty()) return 0
+    val local = db()
+    val rows = ArrayList<Pair<Long, String>>()
+    val c = local.rawQuery("SELECT id, param FROM timer", null)
+    c.use { while (it.moveToNext()) rows.add(it.getLong(0) to (it.getString(1) ?: "")) }
+    var changed = 0
+    local.beginTransaction()
+    try {
+      for ((id, raw) in rows) {
+        if (raw.isEmpty()) continue
+        val current = try { AtkItem.parse(id, raw).page - 100 } catch (e: Exception) { continue }
+        val next = mapping[current] ?: continue
+        if (next == current) continue
+        val updated = replaceBaseField(raw, 1, (100 + next.coerceIn(0, AtkTags.MAX - 1)).toString())
+        if (updated == raw) continue
+        val v = ContentValues()
+        v.put("param", updated)
         local.update("timer", v, "id = ?", arrayOf(id.toString()))
         changed++
       }

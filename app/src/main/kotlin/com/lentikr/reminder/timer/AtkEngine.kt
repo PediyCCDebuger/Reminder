@@ -45,6 +45,13 @@ class AtkEngine(private val context: Context) {
      */
     const val CHANNEL_ALARM_V2 = "addintimer_alarm_v2"
     /**
+     * 3.0.0: a channel's importance is immutable once created. On ROMs that silently downgrade
+     * importance (OnePlus/ColorOS), the old v2 channel can no longer deliver a full-screen
+     * intent. A brand-new HIGH-importance id guarantees the alarm notification is eligible to
+     * launch its full-screen Activity over the keyguard.
+     */
+    const val CHANNEL_ALARM_V3 = "addintimer_alarm_v3"
+    /**
      * Status-bar channel. IMPORTANCE_LOW/MIN channels never draw a status-bar icon on Android 8+,
      * which is why the persistent icon and the 测试执行 icon were invisible. IMPORTANCE_DEFAULT
      * draws the icon; sound/vibration are muted below so it still behaves quietly.
@@ -82,6 +89,19 @@ class AtkEngine(private val context: Context) {
         setBypassDnd(true)
       }
       notifications.createNotificationChannel(alarm)
+      // 3.0.0 full-screen alarm channel. IMPORTANCE_HIGH + VISIBILITY_PUBLIC + bypass DND.
+      // Sound stays null: the tone is produced by AtkAlarmSound so 铃声类型/音量/渐响 are honoured.
+      val alarmV3 = NotificationChannel(
+        CHANNEL_ALARM_V3, "闹钟提醒（全屏）", NotificationManager.IMPORTANCE_HIGH,
+      ).apply {
+        description = "到点提醒：锁屏时点亮屏幕并弹出执行界面"
+        setSound(null, null)
+        enableVibration(false)
+        setShowBadge(true)
+        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        setBypassDnd(true)
+      }
+      notifications.createNotificationChannel(alarmV3)
       // Quiet but visible in the status bar: DEFAULT importance still renders the small icon,
       // while no sound / no vibration / no badge keeps it from disturbing the user.
       val status = NotificationChannel(
@@ -98,25 +118,54 @@ class AtkEngine(private val context: Context) {
   }
 
   /**
-   * The alarm PendingIntent launches [AtkAlarmActivity] *directly*, not a foreground service.
+   * The alarm PendingIntent goes to a **broadcast receiver**, never straight to an Activity.
    *
-   * This is the single most important fix for "锁屏 / 退到后台就听不到闹钟": `setAlarmClock()`
-   * grants an explicit background-activity-launch exemption (it is the API designed for alarm
-   * clocks), so the ringing 执行界面 comes up over the keyguard and turns the screen on even when
-   * the app is fully killed. The previous design pointed this PendingIntent at a foreground
-   * service, which then tried to `startActivity` from a background context — Android 10+ blocks
-   * that, so the surface only appeared after the user unlocked and tapped the notification.
+   * v2.9.0 armed `setAlarmClock()` with `getActivity(AtkAlarmActivity)`. On ColorOS / OnePlus
+   * that background-activity-launch exemption is not honoured, so the surface never came up —
+   * and the full-screen alarm notification was only posted from the Activity/Service, so it never
+   * reached SystemUI either. Deadlock: only tapping the notification after unlocking rang.
    *
-   * The activity itself starts the foreground service for the persistent notification + re-arm.
+   * Both reference apps verified working on this device (SunriseAlarm, Smart Alarm) do this:
+   *   setAlarmClock -> BroadcastReceiver -> post a HIGH-importance notification carrying
+   *   setFullScreenIntent(Activity, true) + start a foreground service.
+   * SystemUI (not our app) launches the full-screen Activity over the keyguard — the only
+   * officially supported background-to-foreground path OEMs honour while the device is locked.
+   * A new request code keeps this distinct from every PendingIntent armed by older builds.
    */
-  private fun fireIntent(id: Long): PendingIntent {
-    val i = Intent(context, AtkAlarmActivity::class.java).apply {
-      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+  private fun fireIntent(
+    id: Long,
+    code: Int = (id * 7 + 11).toInt(),
+    force: Boolean = false,
+  ): PendingIntent {
+    val i = Intent(context, AtkReceiver::class.java).apply {
+      action = ACTION_FIRE
       putExtra(EXTRA_ID, id)
+      if (force) putExtra(EXTRA_FORCE, true)
     }
-    return PendingIntent.getActivity(
-      context, (id * 7 + 1).toInt(), i,
+    return PendingIntent.getBroadcast(
+      context, code, i,
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+  }
+
+  /**
+   * Every PendingIntent flavour armed by 2.5.0–2.9.0. AlarmManager.cancel() matches the exact
+   * PendingIntent type, and PendingIntent equality ignores extras, so a bare Intent per flavour
+   * is enough. Cancelling them on every (re)schedule stops an update from ringing twice.
+   */
+  private fun legacyFireIntents(id: Long): List<PendingIntent> {
+    val f = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    return listOf(
+      legacyFireIntent(id), // <= 2.5.0: broadcast
+      PendingIntent.getForegroundService( // 2.6.0–2.8.0: service
+        context, (id * 7 + 1).toInt(), Intent(context, AtkAlarmService::class.java), f,
+      ),
+      PendingIntent.getActivity( // 2.9.0: activity
+        context, (id * 7 + 1).toInt(), Intent(context, AtkAlarmActivity::class.java), f,
+      ),
+      PendingIntent.getActivity( // 2.9.0: 60s test
+        context, (id * 7 + 7).toInt(), Intent(context, AtkAlarmActivity::class.java), f,
+      ),
     )
   }
 
@@ -195,7 +244,8 @@ class AtkEngine(private val context: Context) {
 
   fun schedule(item: AtkItem) {
     val pi = fireIntent(item.id)
-    runCatching { alarms.cancel(legacyFireIntent(item.id)) }
+    // Drop stale alarms armed by previous builds (broadcast / service / activity flavours).
+    for (old in legacyFireIntents(item.id)) runCatching { alarms.cancel(old) }
     if (!item.enabled) {
       alarms.cancel(pi)
       return
@@ -205,6 +255,8 @@ class AtkEngine(private val context: Context) {
       alarms.cancel(pi)
       return
     }
+    // AlarmClockInfo's show intent is only for the system clock UI ("next alarm" tap); the
+    // actual fire goes to the broadcast receiver, which posts the full-screen notification.
     val show = alarmActivityIntent(item.id, (item.id * 7 + 2).toInt())
     val info = AlarmManager.AlarmClockInfo(ms, show)
     try {
@@ -228,7 +280,8 @@ class AtkEngine(private val context: Context) {
 
   fun cancel(id: Long) {
     runCatching { alarms.cancel(fireIntent(id)) }
-    runCatching { alarms.cancel(legacyFireIntent(id)) }
+    runCatching { alarms.cancel(fireIntent(id, (id * 7 + 13).toInt())) }
+    for (old in legacyFireIntents(id)) runCatching { alarms.cancel(old) }
   }
 
   /**
@@ -239,20 +292,10 @@ class AtkEngine(private val context: Context) {
    * time. This uses a separate request code so the task's normal schedule is left untouched.
    */
   fun fireTestSoon(id: Long) {
-    // Launch the ringing 执行界面 directly (same setAlarmClock exemption as the real alarm) so it
-    // comes up over the lock screen even with the app killed — this is exactly the path the user
-    // needs to verify, and the previous foreground-service indirection defeated it.
-    val i = Intent(context, AtkAlarmActivity::class.java).apply {
-      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-      putExtra(EXTRA_ID, id)
-      // Force the ring chain even if the task is disabled, so the 60s test verifies 响铃 / 渐响 /
-      // 执行界面 without first having to enable the task (测试执行 already ignores enabled).
-      putExtra(EXTRA_FORCE, true)
-    }
-    val pi = PendingIntent.getActivity(
-      context, (id * 7 + 7).toInt(), i,
-      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-    )
+    // Exercise the *exact same* chain as a real alarm: setAlarmClock -> AtkReceiver -> full-screen
+    // notification + foreground service. A separate request code leaves the task's normal
+    // schedule untouched; EXTRA_FORCE makes the chain fire even on a disabled task.
+    val pi = fireIntent(id, (id * 7 + 13).toInt(), force = true)
     val at = System.currentTimeMillis() + 60_000L
     AtkDiag.log(context, "排程: 60 秒后真实触发测试 id=$id")
     // Use setAlarmClock (not setExactAndAllowWhileIdle): the latter is routinely deferred by
@@ -277,18 +320,19 @@ class AtkEngine(private val context: Context) {
    * toast. The high-priority notification is posted first so the status bar also gets the
    * "current alarm" icon next to the persistent "next task" icon.
    */
-  fun launchAlarmFace(id: Long) {
+  fun launchAlarmFace(id: Long, force: Boolean = false) {
     val i = Intent(context, AtkAlarmActivity::class.java).apply {
       addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
       putExtra(EXTRA_ID, id)
+      if (force) putExtra(EXTRA_FORCE, true)
     }
     try {
       context.startActivity(i)
-      AtkDiag.log(context, "执行界面: 已请求启动")
+      AtkDiag.log(context, "执行界面: 已请求直接启动 force=$force")
     } catch (e: Exception) {
-      // Background activity launch may be restricted on some ROMs; the full-screen
-      // notification intent still opens the same surface in that case.
-      AtkDiag.log(context, "执行界面: 启动被拦 ${e.javaClass.simpleName}: ${e.message}")
+      // Belt and braces only: the full-screen notification already asked SystemUI to open the
+      // same surface. A blocked direct launch costs nothing here.
+      AtkDiag.log(context, "执行界面: 直接启动被拦 ${e.javaClass.simpleName}: ${e.message}")
     }
   }
 
@@ -330,14 +374,16 @@ class AtkEngine(private val context: Context) {
     try { showNextNotification(items) } catch (e: Exception) { }
   }
 
-  private fun alarmActivityIntent(id: Long, code: Int): PendingIntent = PendingIntent.getActivity(
-    context, code,
-    Intent(context, AtkAlarmActivity::class.java).apply {
-      flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-      putExtra(EXTRA_ID, id)
-    },
-    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-  )
+  private fun alarmActivityIntent(id: Long, code: Int, force: Boolean = false): PendingIntent =
+    PendingIntent.getActivity(
+      context, code,
+      Intent(context, AtkAlarmActivity::class.java).apply {
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        putExtra(EXTRA_ID, id)
+        if (force) putExtra(EXTRA_FORCE, true)
+      },
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
 
   private fun alarmBody(item: AtkItem): String = buildString {
     append(item.rule.describe())
@@ -351,13 +397,13 @@ class AtkEngine(private val context: Context) {
    * officially supported way to bring a surface up over the lock screen. Also reused as the
    * foreground-service notification so the sound keeps playing while the screen is locked.
    */
-  fun buildAlarmNotification(item: AtkItem): Notification {
+  fun buildAlarmNotification(item: AtkItem, force: Boolean = false): Notification {
     ensureChannel()
-    val full = alarmActivityIntent(item.id, (item.id * 7 + 3).toInt())
+    val full = alarmActivityIntent(item.id, (item.id * 7 + 3).toInt(), force)
     val snooze = actionIntent(ACTION_SNOOZE, item.id, (item.id * 7 + 4).toInt())
     val stop = actionIntent(ACTION_STOP, item.id, (item.id * 7 + 5).toInt())
     val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      Notification.Builder(context, CHANNEL_ALARM_V2)
+      Notification.Builder(context, CHANNEL_ALARM_V3)
     } else {
       @Suppress("DEPRECATION") Notification.Builder(context)
     }
@@ -371,6 +417,10 @@ class AtkEngine(private val context: Context) {
       .setVisibility(Notification.VISIBILITY_PUBLIC)
       .setAutoCancel(false)
       .setOngoing(true)
+      // The receiver posts this once; the foreground service re-posts the same id. Without this,
+      // every re-post would re-trigger the full-screen intent and loop Activity -> Service ->
+      // notify -> Activity forever.
+      .setOnlyAlertOnce(true)
       .setContentIntent(full)
       .setFullScreenIntent(full, true)
       .addAction(R.drawable.ic_atk_stat, "贪睡 10 分钟", snooze)
@@ -385,12 +435,12 @@ class AtkEngine(private val context: Context) {
    *                   channel — DEFAULT importance so the alarm icon appears next to the
    *                   persistent icon, but silent and without a heads-up card.
    */
-  fun showNotification(item: AtkItem, fullScreen: Boolean = true) {
+  fun showNotification(item: AtkItem, fullScreen: Boolean = true, force: Boolean = false) {
     val n = if (fullScreen) {
-      buildAlarmNotification(item)
+      buildAlarmNotification(item, force)
     } else {
       ensureChannel()
-      val open = alarmActivityIntent(item.id, (item.id * 7 + 3).toInt())
+      val open = alarmActivityIntent(item.id, (item.id * 7 + 3).toInt(), force)
       val stop = actionIntent(ACTION_STOP, item.id, (item.id * 7 + 5).toInt())
       val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         Notification.Builder(context, CHANNEL_STATUS)
@@ -497,6 +547,10 @@ class AtkEngine(private val context: Context) {
 
   fun dismiss(id: Long) = notifications.cancel(id.toInt())
 
+  /** Whether Android still lets this app launch a full-screen Activity over the keyguard. */
+  fun canUseFullScreenIntent(): Boolean =
+    if (Build.VERSION.SDK_INT >= 34) notifications.canUseFullScreenIntent() else true
+
   /** Human-readable permission checklist for the 权限自检 screen. */
   fun permissionReport(): List<Pair<String, Boolean>> {
     val out = ArrayList<Pair<String, Boolean>>()
@@ -507,7 +561,7 @@ class AtkEngine(private val context: Context) {
     val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
     out.add("忽略电池优化" to pm.isIgnoringBatteryOptimizations(context.packageName))
     if (Build.VERSION.SDK_INT >= 34) {
-      out.add("全屏通知" to notifications.canUseFullScreenIntent())
+      out.add("全屏通知" to canUseFullScreenIntent())
     }
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
       out.add("悬浮窗（后台弹出界面）" to Settings.canDrawOverlays(context))

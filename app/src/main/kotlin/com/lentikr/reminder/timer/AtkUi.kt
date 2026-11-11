@@ -60,7 +60,6 @@ import java.util.Locale
 
 private enum class Screen { LIST, EDIT, SETTINGS, TAGS, PERMISSIONS }
 
-private val TAB_NAMES = listOf("常用", "生活", "纪念日", "生日")
 private val CONTEXT_ENTRIES = listOf(
   "测试执行", "删除条目", "参考新建", "执行规划", "查看日志", "移动分类", "多选模式",
   "60 秒后真实触发",
@@ -80,7 +79,9 @@ fun TimerApp() {
     var editingId by remember { mutableStateOf(-1L) }
     var preset by remember { mutableIntStateOf(0) }
     var timerList by remember { mutableStateOf(emptyList<AtkItem>()) }
+    var tags by remember { mutableStateOf(AtkTags.load(context)) }
     var message by remember { mutableStateOf("") }
+    var permissionPrompt by remember { mutableStateOf(false) }
     var newTaskOpen by remember { mutableStateOf(false) }
     var systemMenuOpen by remember { mutableStateOf(false) }
     var backupOpen by remember { mutableStateOf(false) }
@@ -101,6 +102,52 @@ fun TimerApp() {
       try { engine.rescheduleAll() } catch (e: Exception) { }
     }
 
+    /** Persist a new tag list and keep the current tab inside its bounds. */
+    fun commitTags(next: List<AtkTag>) {
+      tags = next
+      AtkTags.save(context, next)
+      if (tab >= next.size) tab = 0
+    }
+
+    fun renameTag(index: Int, name: String) =
+      commitTags(tags.mapIndexed { i, t -> if (i == index) t.copy(name = name) else t })
+
+    fun setTagIcon(index: Int, icon: String) =
+      commitTags(tags.mapIndexed { i, t -> if (i == index) t.copy(icon = icon) else t })
+
+    /** Swap two adjacent labels; swap the tasks' page values too so they follow their label. */
+    fun moveTag(from: Int, to: Int) {
+      if (from !in tags.indices || to !in tags.indices) return
+      val next = tags.toMutableList()
+      java.util.Collections.swap(next, from, to)
+      try {
+        store.remapPages(mapOf(from to to, to to from))
+      } catch (e: Exception) {
+        message = "调整顺序失败：" + e.message
+      }
+      commitTags(next)
+      refresh()
+    }
+
+    /** Remove a label: its tasks move to the first tab, later tabs shift down by one. */
+    fun deleteTag(index: Int) {
+      if (tags.size <= 1 || index !in tags.indices) return
+      val mapping = HashMap<Int, Int>()
+      // Tasks of the deleted tab go to the first surviving tab (index 0).
+      mapping[index] = 0
+      for (p in index + 1 until tags.size) mapping[p] = p - 1
+      try {
+        store.remapPages(mapping)
+      } catch (e: Exception) {
+        message = "删除标签失败：" + e.message
+      }
+      val next = tags.toMutableList()
+      next.removeAt(index)
+      commitTags(next)
+      refresh()
+      toast(context, "已删除标签，任务已移到「${next.first().name}」")
+    }
+
     // First install: the original AddinTimer ships 18 sample timers. Also republish the
     // "最近的一次任务" notification on every launch / boot so the status-bar icon stays.
     LaunchedEffect(Unit) {
@@ -118,6 +165,17 @@ fun TimerApp() {
         engine.rescheduleAll()
       } catch (e: Exception) {
         timerList = emptyList()
+      }
+      // Android 14+ can silently revoke USE_FULL_SCREEN_INTENT. Without it the alarm only
+      // shows a notification and never comes up over the keyguard — exactly the reported
+      // symptom — so surface the switch once per install instead of hiding it in 权限自检.
+      try {
+        val needFullScreen = android.os.Build.VERSION.SDK_INT >= 34 &&
+          !engine.canUseFullScreenIntent()
+        permissionPrompt = needFullScreen &&
+          !prefs.getBoolean("fullscreen_prompt_seen", false)
+      } catch (e: Exception) {
+        permissionPrompt = false
       }
     }
 
@@ -165,6 +223,7 @@ fun TimerApp() {
         Screen.LIST -> MainScreen(
           timerList = timerList,
           tab = tab,
+          tags = tags,
           engine = engine,
           selectionMode = selectionMode,
           selectedIds = selectedIds,
@@ -213,8 +272,14 @@ fun TimerApp() {
         )
 
         Screen.TAGS -> TagsScreen(
+          tags = tags,
           onBack = { screen = Screen.LIST },
           onPick = { i -> tab = i; screen = Screen.LIST },
+          onRename = { i, name -> renameTag(i, name) },
+          onIcon = { i, icon -> setTagIcon(i, icon) },
+          onDelete = { i -> deleteTag(i) },
+          onMove = { from, to -> moveTag(from, to) },
+          onMessage = { message = it },
         )
 
         Screen.PERMISSIONS -> PermissionScreen(
@@ -402,14 +467,14 @@ fun TimerApp() {
     moveItem?.let { item ->
       AtkChoiceDialog(
         title = "移动分类",
-        options = TAB_NAMES,
+        options = AtkTags.names(tags),
         selected = item.pageIndex(),
         onPick = { i ->
           store.moveToPage(listOf(item.id), i)
           refresh()
           moveItem = null
           tab = i
-          toast(context, "已移动到「${TAB_NAMES[i]}」")
+          toast(context, "已移动到「${tags[i].name}」")
         },
         onDismiss = { moveItem = null },
       )
@@ -418,7 +483,7 @@ fun TimerApp() {
     if (batchMoveOpen) {
       AtkChoiceDialog(
         title = "批量移动分类（已选 ${selectedIds.size} 项）",
-        options = TAB_NAMES,
+        options = AtkTags.names(tags),
         selected = tab,
         onPick = { i ->
           val n = try { store.moveToPage(selectedIds, i) } catch (e: Exception) { 0 }
@@ -427,7 +492,7 @@ fun TimerApp() {
           selectedIds = emptySet()
           tab = i
           refresh()
-          toast(context, "已移动 $n 项到「${TAB_NAMES[i]}」")
+          toast(context, "已移动 $n 项到「${tags[i].name}」")
         },
         onDismiss = { batchMoveOpen = false },
       )
@@ -475,6 +540,26 @@ fun TimerApp() {
       )
     }
 
+    if (permissionPrompt) {
+      AtkMessageDialog(
+        title = "需要开启「全屏通知」",
+        body = "检测到系统未授予本应用全屏通知权限。Android 14+ 默认关闭该权限，" +
+          "关闭时闹钟到点只会在通知栏提示，锁屏下无法点亮屏幕并弹出执行界面。" +
+          "请点「去开启」，在系统设置里允许本应用的全屏通知。",
+        confirmText = "去开启",
+        onConfirm = {
+          permissionPrompt = false
+          prefs.edit().putBoolean("fullscreen_prompt_seen", true).apply()
+          engine.openFullScreenSettings()
+        },
+        dismissText = "暂不",
+        onDismiss = {
+          permissionPrompt = false
+          prefs.edit().putBoolean("fullscreen_prompt_seen", true).apply()
+        },
+      )
+    }
+
     if (message.isNotEmpty()) {
       AtkMessageDialog(title = "提示", body = message, onDismiss = { message = "" })
     }
@@ -487,6 +572,7 @@ fun TimerApp() {
 private fun MainScreen(
   timerList: List<AtkItem>,
   tab: Int,
+  tags: List<AtkTag>,
   engine: AtkEngine,
   selectionMode: Boolean,
   selectedIds: Set<Long>,
@@ -565,7 +651,7 @@ private fun MainScreen(
         SelectionButton("取消", Modifier.weight(1f), onClick = { onSelectMode(false) })
       }
     }
-    AtkTabBar(tab, onTab)
+    AtkTabBar(tab, onTab, tags)
   }
 }
 
@@ -807,27 +893,121 @@ private fun SettingsScreen(
   }
 }
 
+private val TAG_ACTIONS = listOf("修改标签", "修改图标", "删除标签", "向上移动", "向下移动")
+
+/**
+ * 管理标签. Tap a row to jump to that tab; LONG-PRESS opens the original's action menu
+ * (修改标签 / 修改图标 / 删除标签 / 向上移动 / 向下移动). All edits persist via [AtkTags] and
+ * task→tab remapping is delegated to the caller so the database stays in sync.
+ */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun TagsScreen(onBack: () -> Unit, onPick: (Int) -> Unit) {
-  val icons = listOf("\uD83C\uDF3C", "\u2602", "\uD83D\uDCC5", "\uD83C\uDF88")
+private fun TagsScreen(
+  tags: List<AtkTag>,
+  onBack: () -> Unit,
+  onPick: (Int) -> Unit,
+  onRename: (Int, String) -> Unit,
+  onIcon: (Int, String) -> Unit,
+  onDelete: (Int) -> Unit,
+  onMove: (Int, Int) -> Unit,
+  onMessage: (String) -> Unit,
+) {
+  var menuIndex by remember { mutableStateOf(-1) }
+  var renameIndex by remember { mutableStateOf(-1) }
+  var iconIndex by remember { mutableStateOf(-1) }
+  var deleteIndex by remember { mutableStateOf(-1) }
+
   Column(Modifier.fillMaxSize()) {
     AtkTitleBar("管理标签", onBack = onBack)
-    for (i in 0..3) {
+    tags.forEachIndexed { i, tag ->
       Row(
         Modifier
           .fillMaxWidth()
           .height(60.dp)
           .background(AtkSkin.bgDeep)
-          .clickable { onPick(i) }
+          .combinedClickable(
+            onClick = { onPick(i) },
+            onLongClick = { menuIndex = i },
+          )
           .padding(horizontal = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
       ) {
-        Text(icons[i], fontSize = 22.sp, color = Color.White)
+        Text(tag.icon, fontSize = 22.sp, color = Color.White)
         Spacer(Modifier.width(16.dp))
-        Text(TAB_NAMES[i], color = Color.White, fontSize = 19.sp)
+        Text(tag.name, color = Color.White, fontSize = 19.sp)
       }
       Box(Modifier.fillMaxWidth().height(1.dp).background(AtkSkin.divider))
     }
+    Text(
+      "点击标签进入该分类；长按标签可修改名称、图标、删除或调整顺序。",
+      color = AtkSkin.sectionText,
+      fontSize = 13.sp,
+      modifier = Modifier.padding(14.dp),
+    )
+  }
+
+  if (menuIndex in tags.indices) {
+    val i = menuIndex
+    AtkLightContextMenu(
+      entries = TAG_ACTIONS,
+      onPick = { which ->
+        menuIndex = -1
+        when (which) {
+          0 -> renameIndex = i
+          1 -> iconIndex = i
+          2 -> deleteIndex = i
+          3 -> {
+            if (i == 0) onMessage("已经在最上方") else onMove(i, i - 1)
+          }
+          4 -> {
+            if (i == tags.lastIndex) onMessage("已经在最下方") else onMove(i, i + 1)
+          }
+        }
+      },
+      onDismiss = { menuIndex = -1 },
+    )
+  }
+
+  if (renameIndex in tags.indices) {
+    val i = renameIndex
+    AtkInputDialog(
+      title = "修改标签",
+      initial = tags[i].name,
+      onConfirm = { text ->
+        renameIndex = -1
+        if (text.isBlank()) onMessage("标签名不能为空") else onRename(i, text.trim())
+      },
+      onDismiss = { renameIndex = -1 },
+    )
+  }
+
+  if (iconIndex in tags.indices) {
+    val i = iconIndex
+    AtkIconPickerDialog(
+      current = tags[i].icon,
+      onPick = { icon -> iconIndex = -1; onIcon(i, icon) },
+      onDismiss = { iconIndex = -1 },
+    )
+  }
+
+  if (deleteIndex in tags.indices) {
+    val i = deleteIndex
+    AtkMessageDialog(
+      title = "删除标签",
+      body = if (tags.size <= 1) {
+        "至少需要保留一个标签，无法删除。"
+      } else {
+        val survivor = if (i == 0) tags[1].name else tags[0].name
+        "确定删除标签「${tags[i].name}」？该分类下的任务会自动移到「$survivor」。"
+      },
+      confirmText = "删除",
+      dismissText = "取消",
+      onDismiss = { deleteIndex = -1 },
+      onConfirm = {
+        deleteIndex = -1
+        if (tags.size <= 1) onMessage("至少需要保留一个标签") else onDelete(i)
+      },
+    )
   }
 }
 

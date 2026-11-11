@@ -2,6 +2,19 @@
 
 每个 Release 的说明都取自本文件对应版本的小节，由打包工作流自动写入 GitHub Release。
 
+## [3.0.0] - 2026-11-11
+
+### 修复（真机反馈）
+- **锁屏 / 退出 APP 后任务仍不执行（2.9.0 未解决）**：2.9.0 把 `setAlarmClock` 的 `PendingIntent` 改成直接指向 `AtkAlarmActivity`，但一加 13 / ColorOS 并不授予这种后台启动 Activity 的豁免；界面起不来，而带 `setFullScreenIntent` 的闹钟通知又只在界面 / 服务起来之后才发出，形成死锁——只有解锁点通知才会响。参考两款在本机验证可用的应用重构：开源 SunriseAlarm（`setExactAndAllowWhileIdle` → 广播 → `specialUse` 前台服务 → 高优先级通知 + `setFullScreenIntent`）与逆向的 Smart Alarm 2.7.7（`AlarmReceiver` 先取 `WakeLock` → `LaunchAlarm` 服务构建 `PRIORITY_MAX / CATEGORY_ALARM / VISIBILITY_PUBLIC / setFullScreenIntent(AlarmActivity, true)` 通知 → `NotificationManager.notify()` → 再 `startActivity` 兜底）。本次改为：`setAlarmClock` 的 `PendingIntent` 指向**广播接收器**，接收器**第一件事就发出带 `setFullScreenIntent` 的高优先级通知**，由系统 UI（而非 App 自己）把执行界面带出锁屏并点亮屏幕；随后播铃、启动前台服务，并额外尝试一次直接拉界面作为兜底。通知改用全新的 `IMPORTANCE_HIGH` 渠道（渠道重要性创建后不可变，旧渠道可能已被系统降级），加 `setOnlyAlertOnce` 防止 Activity→服务→通知的循环；前台服务类型由 `mediaPlayback` 改为 `specialUse` 优先（Android 14+ 会因缺少可见 MediaSession 在约 1 秒后强杀 `mediaPlayback` 服务，2.8.0 日志里的 `svc: onDestroy（前台=true）` 即此）。「60 秒后真实触发」走完全相同的链路，便于直接验证。同时在首次进入时检测并引导开启 Android 14+ 默认关闭的「全屏通知」权限。
+- **弹出窗口风格与原版不一致**：选项弹窗原为蓝色标题栏 + 选中项浅蓝底 + 蓝色文字圆点。现统一为原版样式：黑色标题栏白字、纯白列表、**每一行右侧都有空心单选圆圈**、选中项为圈内绿色实心点、底部灰色取消条。铃声 / 选择音乐的单选弹窗、多选弹窗同步统一。
+
+### 新增
+- **管理标签长按操作**：主菜单 →「管理标签」，长按任一标签弹出原版操作菜单「修改标签 / 修改图标 / 删除标签 / 向上移动 / 向下移动」。标签名与图标可自定义并持久化（不再写死 4 个）；删除或调整顺序时自动重排任务的分类归属，使任务始终跟着标签走。标签数据独立于 `.atk` 备份，导出格式保持和原版逐字节兼容。底部标签栏、移动分类、批量移动分类现在都读取动态标签名。
+
+### 注意
+- 3.0.0 使用与 2.9.0 相同的签名密钥，可直接覆盖安装。若手机上仍是 2.8.0 或更早版本，需先卸载再安装（那些版本由 CI 用随机密钥签名）。
+- 锁屏可用性依赖系统权限：请在「系统设置 → 服务状态 → 权限自检」确认「全屏通知」「精确闹钟」「忽略电池优化」均为已开启；一加 / ColorOS 还需允许自启动、后台运行与锁屏显示。
+
 ## [2.9.0] - 2026-11-10
 
 ### 修复（真机反馈）

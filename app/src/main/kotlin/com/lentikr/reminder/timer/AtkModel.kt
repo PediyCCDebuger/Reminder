@@ -240,8 +240,8 @@ class AtkItem {
   }
 
   /** Bottom tabs of the original main screen are stored as 100..103 in base[1]. */
-  fun pageIndex(): Int = (page - 100).coerceIn(0, 3)
-  fun moveToPage(index: Int) { page = 100 + index.coerceIn(0, 3) }
+  fun pageIndex(): Int = (page - 100).coerceIn(0, AtkTags.MAX - 1)
+  fun moveToPage(index: Int) { page = 100 + index.coerceIn(0, AtkTags.MAX - 1) }
 
   /** "[按周] 一,二,三,四,五" style second line used by the original list rows. */
   fun summary(): String = try {

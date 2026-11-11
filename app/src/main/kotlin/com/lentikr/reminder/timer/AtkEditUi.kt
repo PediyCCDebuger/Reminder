@@ -829,7 +829,7 @@ private fun ParamTab(draft: AtkItem, change: (() -> Unit) -> Unit, onMessage: (S
 
 /**
  * Single-choice list with an explicit 确定 / 取消 row, matching the original 铃声 and 选择音乐
- * pickers (round radio marks, white panel, blue title strip).
+ * pickers (outlined radio marks with a green dot, white panel, black title strip).
  */
 @Composable
 private fun AtkRadioDialog(
@@ -841,13 +841,14 @@ private fun AtkRadioDialog(
 ) {
   var picked by remember { mutableStateOf(selectedValue) }
   Dialog(onDismissRequest = onDismiss) {
-    Column(Modifier.width(330.dp).background(AtkSkin.lightPanel)) {
+    Column(Modifier.width(330.dp).background(Color.White)) {
       AtkDialogTitle(title)
       LazyColumn(Modifier.fillMaxWidth().heightIn(max = 380.dp)) {
         items(options) { entry ->
           Row(
             Modifier
               .fillMaxWidth()
+              .background(Color.White)
               .clickable { picked = entry.second }
               .padding(horizontal = 16.dp, vertical = 13.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -865,7 +866,7 @@ private fun AtkRadioDialog(
               contentAlignment = Alignment.Center,
             ) {
               if (picked == entry.second) {
-                Box(Modifier.size(12.dp).background(Color(0xFF1490DE), CircleShape))
+                Box(Modifier.size(12.dp).background(AtkSkin.green, CircleShape))
               }
             }
           }

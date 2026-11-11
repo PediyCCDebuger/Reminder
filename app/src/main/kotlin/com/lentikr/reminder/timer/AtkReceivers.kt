@@ -319,18 +319,28 @@ class AtkReceiver : BroadcastReceiver() {
       }
 
       AtkEngine.ACTION_FIRE -> {
+        val force = intent.getBooleanExtra(AtkEngine.EXTRA_FORCE, false)
         val item = if (id >= 0) store.get(id) else null
         AtkDiag.log(
           context,
-          "触发 id=$id 任务=${item?.name ?: "查不到"} 启用=${item?.enabled}",
+          "触发 id=$id 任务=${item?.name ?: "查不到"} 启用=${item?.enabled} force=$force",
         )
-        if (item != null && item.enabled) {
-          // Sound first, straight from the receiver. If the process is torn down before the
-          // service is up, the tone has already started instead of the alarm staying silent.
-          AtkAlarmSound.play(context, item)
+        if (item != null && (item.enabled || force)) {
+          // 1) Post the HIGH-importance notification carrying setFullScreenIntent(Activity).
+          //    This is the single decisive step: SystemUI itself launches the full-screen
+          //    Activity over the keyguard. Both SunriseAlarm and Smart Alarm rely on exactly
+          //    this, and it works on OnePlus/ColorOS where a plain background startActivity
+          //    is blocked. It must happen HERE, in the broadcast, never from the Activity.
           engine.ensureChannel()
-          engine.showNotification(item)
-          startAlarmService(context, engine, id)
+          engine.showNotification(item, fullScreen = true, force = force)
+          AtkDiag.log(context, "全屏通知: 已从广播发出 id=$id")
+          // 2) Tone straight from the receiver, so a killed process still starts audible.
+          AtkAlarmSound.play(context, item)
+          // 3) A foreground service keeps the process (and the tone) alive while locked.
+          startAlarmService(context, engine, id, force)
+          // 4) Smart Alarm's extra net: try to raise the surface directly too. Blocked on
+          //    most ROMs, harmless when it is; the notification already handles it.
+          engine.launchAlarmFace(id, force)
           store.log(id, 1, item.name)
           engine.schedule(item)
           engine.refreshNext()
@@ -341,9 +351,11 @@ class AtkReceiver : BroadcastReceiver() {
         val item = if (id >= 0) store.get(id) else null
         AtkDiag.log(context, "贪睡到点 id=$id 任务=${item?.name}")
         if (item != null && item.enabled) {
+          engine.ensureChannel()
+          engine.showNotification(item, fullScreen = true)
           AtkAlarmSound.play(context, item)
-          engine.showNotification(item)
-          startAlarmService(context, engine, id)
+          startAlarmService(context, engine, id, false)
+          engine.launchAlarmFace(id)
           store.log(id, 2, item.name + " 贪睡")
         }
       }
@@ -385,10 +397,11 @@ class AtkReceiver : BroadcastReceiver() {
    * the tone is already playing (see ACTION_FIRE) and the full-screen notification still opens
    * the 执行界面 if the service is rejected.
    */
-  private fun startAlarmService(context: Context, engine: AtkEngine, id: Long) {
+  private fun startAlarmService(context: Context, engine: AtkEngine, id: Long, force: Boolean) {
     val svc = Intent(context, AtkAlarmService::class.java).apply {
       putExtra(AtkAlarmService.EXTRA_ACTION, AtkAlarmService.ACTION_START)
       putExtra(AtkEngine.EXTRA_ID, id)
+      putExtra(AtkAlarmService.EXTRA_FORCE, force)
     }
     try {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -398,12 +411,13 @@ class AtkReceiver : BroadcastReceiver() {
       }
       AtkDiag.log(context, "前台服务: 启动请求已发出")
     } catch (e: Exception) {
+      // Android 12+ / ColorOS may refuse a background FGS start. The full-screen notification
+      // was already posted and the tone is already playing, so the alarm is NOT lost here.
       AtkDiag.log(context, "前台服务: 启动被拒 ${e.javaClass.simpleName}: ${e.message}")
       val item = runCatching { AtkStore(context).get(id) }.getOrNull() ?: return
-      // FGS refused: the tone is already running in this process, just open the surface too.
       AtkAlarmSound.play(context, item)
-      engine.showNotification(item)
-      engine.launchAlarmFace(id)
+      engine.showNotification(item, fullScreen = true, force = force)
+      engine.launchAlarmFace(id, force)
     }
   }
 
@@ -416,12 +430,15 @@ class AtkReceiver : BroadcastReceiver() {
 }
 
 /**
- * Full-screen alarm surface — the **direct** fire entry from `setAlarmClock()` (and 测试执行 /
- * 60 秒后真实触发). It is launched straight from the alarm manager, whose background-activity
- * exemption lets it come up over the keyguard and turn the screen on even with the app killed.
- * It plays the tone itself and starts the foreground service purely for the persistent
- * notification + re-arm; dismissing this surface therefore does not silence an alarm that the
- * service is still honouring (matches how the system clock behaves when you swipe its surface).
+ * Full-screen alarm surface. It is **launched by SystemUI** through the full-screen intent of
+ * the HIGH-importance notification the broadcast receiver posts (setFullScreenIntent), not by
+ * `setAlarmClock()` and not by a background `startActivity()` — both of which OnePlus/ColorOS
+ * block. This mirrors SunriseAlarm and Smart Alarm, the two apps verified working on the test
+ * device. 测试执行 opens it directly from the foreground as before.
+ *
+ * It plays the tone itself (idempotent) and starts the foreground service for the persistent
+ * notification + re-arm; dismissing this surface therefore does not silence an alarm the service
+ * is still honouring (matches the system clock's behaviour when you swipe its surface away).
  */
 class AtkAlarmActivity : ComponentActivity() {
 
