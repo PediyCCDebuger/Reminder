@@ -2,6 +2,20 @@
 
 每个 Release 的说明都取自本文件对应版本的小节，由打包工作流自动写入 GitHub Release。
 
+## [3.5.0] - 2026-11-11
+
+### 修复（真机日志定位：FSI 被吞，3.4.0「2.5s 内 FSI 未拉起」）
+
+**根因**：对照本机验证可用的 SunriseAlarm，发现唯一关键差异在**排程方式**。我们一直用 `AlarmManager.setAlarmClock()`（真实排程与「60 秒后真实触发」都用），而 SunriseAlarm 用 `setExactAndAllowWhileIdle()`。在本机 ColorOS / 一加 13 上，`setAlarmClock` 会让系统接管闹钟界面、**压制 App 自己的 full-screen intent（FSI）**——于是 3.4.0 日志里出现「2.5s 内 FSI 未拉起」，界面只能靠看门狗的后台 `startActivity` 兜底；而那种启动路径在 ColorOS 上会无视 `setTurnScreenOn`，导致「界面 onResume 了、亮屏=true，但屏幕始终黑、也没声音」。点通知「先进主界面再弹执行界面」也是这个兜底把 `AtkAlarmActivity` 叠进了 `MainActivity` 的任务栈所致。
+
+**修复**：
+
+- 对齐 SunriseAlarm：排程改用 `setExactAndAllowWhileIdle()`（精确闹钟权限缺失时降级 `setAndAllowWhileIdle()` → 普通 `set()`），**不再使用 `setAlarmClock()`**。代价是系统时钟 App 不再显示「下次闹钟」指示，但换取稳定锁屏亮屏。
+- FSI / contentIntent 的 Activity flags 由 `NEW_TASK | CLEAR_TOP` 改为 `NEW_TASK | CLEAR_TASK`（与 SunriseAlarm 一致），使执行界面成为独立 task root，干净地盖在锁屏之上，不再叠进主界面任务栈。
+- 保留 2.5s 看门狗作为兜底（仅当 FSI 真被 ROM 吞掉时退而求其次），但因根因已修，正常情况下不会被触发。
+
+**说明**：3.4.0 的亮屏唤醒锁、日志复制/导出、编辑后询问激活等能力均保留。若 3.5.0 仍「FSI 被吞、锁屏不亮」，下一步启用已声明的 `SYSTEM_ALERT_WINDOW` 悬浮窗兜底（SunriseAlarm 不需要，是因为它用 `setExactAndAllowWhileIdle` 后 FSI 正常）。
+
 ## [3.4.0] - 2026-11-11
 
 ### 修复（真机日志定位：界面已 onResume 且 亮屏=true，但屏幕仍黑、且无声音）

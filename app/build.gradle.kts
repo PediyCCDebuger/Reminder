@@ -28,8 +28,8 @@ android {
     applicationId = "app.lentikr.reminder"
     minSdk = 29
     targetSdk = 37
-    versionCode = 35
-    versionName = "3.4.0"
+    versionCode = 36
+    versionName = "3.5.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

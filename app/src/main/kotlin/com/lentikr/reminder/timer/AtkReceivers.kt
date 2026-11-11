@@ -430,10 +430,15 @@ class AtkReceiver : BroadcastReceiver() {
           PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val at = System.currentTimeMillis() + 10 * 60 * 1000L
+        // 3.5.0：贪睡也改用 setExactAndAllowWhileIdle，避免 setAlarmClock 压制 FSI（与真实排程一致）。
         try {
-          alarms.setAlarmClock(AlarmManager.AlarmClockInfo(at, null), pi)
+          alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
         } catch (e: SecurityException) {
-          alarms.set(AlarmManager.RTC_WAKEUP, at, pi)
+          try {
+            alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+          } catch (e2: SecurityException) {
+            alarms.set(AlarmManager.RTC_WAKEUP, at, pi)
+          }
         }
       }
 

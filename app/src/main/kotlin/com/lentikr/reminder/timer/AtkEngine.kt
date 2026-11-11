@@ -291,24 +291,38 @@ class AtkEngine(private val context: Context) {
       alarms.cancel(pi)
       return
     }
-    // AlarmClockInfo's show intent is only for the system clock UI ("next alarm" tap); the
-    // actual fire goes to the broadcast receiver, which posts the full-screen notification.
-    val show = alarmActivityIntent(item.id, (item.id * 7 + 2).toInt())
-    val info = AlarmManager.AlarmClockInfo(ms, show)
-    try {
-      alarms.setAlarmClock(info, pi)
+    // 3.5.0 根因修复：对齐 SunriseAlarm（本机验证可用）——改用 setExactAndAllowWhileIdle，不再用
+    // setAlarmClock。根因见 [fireTestSoon]：setAlarmClock 在本机 ColorOS / 一加 13 上让系统接管闹钟
+    // 界面、压制 App 自己的 full-screen intent，FSI 因此被吞（3.4.0 日志「2.5s 内 FSI 未拉起」），
+    // 界面只能靠看门狗的后台 startActivity 兜底，而那种启动方式在 ColorOS 上点不亮屏幕。
+    // setAlarmClock 的「系统时钟显示下次闹钟」指示因此不再提供，但换取稳定亮屏。
+    setExactAlarm(ms, pi, item.name)
+  }
+
+  /**
+   * 3.5.0：与 SunriseAlarm 一致的精确闹钟阶梯。setExactAndAllowWhileIdle 是 doze 豁免、到点触发
+   * 的精确闹钟；精确闹钟权限缺失时降级到 setAndAllowWhileIdle，再不行用普通 set。返回是否成功排程。
+   */
+  private fun setExactAlarm(ms: Long, pi: PendingIntent, name: String): Boolean {
+    return try {
+      alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, ms, pi)
+      AtkDiag.log(context, "排程: setExactAndAllowWhileIdle 已设定 id=$name @$ms")
+      true
     } catch (e: SecurityException) {
-      // Exact-alarm permission missing (Android 13+/14+ or some ColorOS builds). Work down
-      // the ladder so the timer still fires instead of silently doing nothing.
-      AtkDiag.log(context, "排程: setAlarmClock 被拒（${e.message}），改用 setExact")
+      AtkDiag.log(context, "排程: setExactAndAllowWhileIdle 被拒（${e.message}），降级 setAndAllowWhileIdle")
       try {
-        alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, ms, pi)
+        alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, ms, pi)
+        AtkDiag.log(context, "排程: setAndAllowWhileIdle 已设定 id=$name")
+        true
       } catch (e2: SecurityException) {
-        AtkDiag.log(context, "排程: setExact 也被拒（${e2.message}），改用非精确闹钟")
+        AtkDiag.log(context, "排程: setAndAllowWhileIdle 也被拒（${e2.message}），降级 set")
         try {
-          alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, ms, pi)
-        } catch (ignored: SecurityException) {
-          AtkDiag.log(context, "排程: 全部失败，任务 ${item.name} 无法定时")
+          alarms.set(AlarmManager.RTC_WAKEUP, ms, pi)
+          AtkDiag.log(context, "排程: set 已设定 id=$name")
+          true
+        } catch (e3: SecurityException) {
+          AtkDiag.log(context, "排程: 全部失败，任务 $name 无法定时")
+          false
         }
       }
     }
@@ -328,27 +342,16 @@ class AtkEngine(private val context: Context) {
    * time. This uses a separate request code so the task's normal schedule is left untouched.
    */
   fun fireTestSoon(id: Long) {
-    // Exercise the *exact same* chain as a real alarm: setAlarmClock -> AtkReceiver -> full-screen
-    // notification + foreground service. A separate request code leaves the task's normal
-    // schedule untouched; EXTRA_FORCE makes the chain fire even on a disabled task.
+    // Exercise the *exact same* chain as a real alarm: setExactAndAllowWhileIdle -> AtkReceiver
+    // -> full-screen notification + foreground service. A separate request code leaves the task's
+    // normal schedule untouched; EXTRA_FORCE makes the chain fire even on a disabled task.
+    // 3.5.0：与真实排程一致用 setExactAndAllowWhileIdle（不再用 setAlarmClock）。setAlarmClock 在
+    // 本机 ColorOS 上会压制 App 的 full-screen intent，导致 FSI 被吞、锁屏不亮屏——这是 3.4.0 之前
+    // 一直「到点不亮屏」的根因，必须对齐 SunriseAlarm 的 setExactAndAllowWhileIdle。
     val pi = fireIntent(id, (id * 7 + 13).toInt(), force = true)
     val at = System.currentTimeMillis() + 60_000L
     AtkDiag.log(context, "排程: 60 秒后真实触发测试 id=$id")
-    // Use setAlarmClock (not setExactAndAllowWhileIdle): the latter is routinely deferred by
-    // several minutes when the device is dozing, which made the test look like "nothing rang".
-    // setAlarmClock is the highest-priority, doze-exempt alarm and is what the real schedule
-    // already uses, so the test now exercises the exact same on-time path.
-    val info = AlarmManager.AlarmClockInfo(at, alarmActivityIntent(id, (id * 7 + 9).toInt()))
-    try {
-      alarms.setAlarmClock(info, pi)
-    } catch (e: SecurityException) {
-      AtkDiag.log(context, "排程: 测试触发 setAlarmClock 被拒（${e.message}），改用 setExact")
-      try {
-        alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
-      } catch (e2: SecurityException) {
-        alarms.set(AlarmManager.RTC_WAKEUP, at, pi)
-      }
-    }
+    setExactAlarm(at, pi, "测试$id")
   }
 
   /**
@@ -370,7 +373,7 @@ class AtkEngine(private val context: Context) {
       lastFaceLaunchAt = now
     }
     val i = Intent(context, AtkAlarmActivity::class.java).apply {
-      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
       putExtra(EXTRA_ID, id)
       if (force) putExtra(EXTRA_FORCE, true)
     }
@@ -426,7 +429,9 @@ class AtkEngine(private val context: Context) {
     PendingIntent.getActivity(
       context, code,
       Intent(context, AtkAlarmActivity::class.java).apply {
-        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        // 3.5.0：对齐 SunriseAlarm 的 FSI/contentIntent flags（NEW_TASK | CLEAR_TASK），使执行界面
+        // 成为独立 task root，挂锁屏时干净地盖在最上层，不会被叠进 MainActivity 的任务栈。
+        flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         putExtra(EXTRA_ID, id)
         if (force) putExtra(EXTRA_FORCE, true)
       },
