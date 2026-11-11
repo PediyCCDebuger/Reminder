@@ -93,7 +93,7 @@
 | `AddinTimerRevive-<版本>-armeabi-v7a.apk` | 32 位 ARM |
 | `AddinTimerRevive-<版本>-universal.apk` | 通用（模拟器 / x86） |
 
-推送 `main` 会触发 **Build APK** 工作流，自动构建、验签并发布/更新 Release（含 `SHA256SUMS` 与从 `CHANGELOG.md` 提取的中文变更说明）；推送 `v*` tag 或手动运行 **Release** 工作流效果相同。签名使用仓库内 `.github/signing/release.keystore.b64` 这份**公开的 debug 密钥**，因此从 2.3.0 起各版本签名一致、可直接覆盖安装；2.2.0 及更早版本签名不同，升级时需先卸载一次。若配置了 `REMINDER_KEYSTORE_BASE64` / `REMINDER_STORE_PASSWORD` secrets，则优先使用自己的密钥（更换密钥同样需要卸载）。生产用途请勿把私钥放进公开仓库。
+`repository_dispatch`（类型 `build-release`）会触发 **Release** 工作流：构建、验签并发布/更新 Release（含 `SHA256SUMS` 和从 `CHANGELOG.md` 提取的中文变更说明）；推送 `v*` tag 或手动运行 **Release** 工作流效果相同。**Build APK** 工作流仅手动触发、只上传构建产物，不发布 Release。签名密钥只保存在 GitHub Secrets（`REMINDER_KEYSTORE_BASE64` / `REMINDER_STORE_PASSWORD`）中，仓库里没有、也从未提交过密钥；本地 `.github/signing/` 已被 `.gitignore` 忽略。从 2.9.0 起各版本使用同一把密钥签名，可直接覆盖安装；2.8.0 及更早版本由 CI 每次随机生成密钥，升级到 2.9.0+ 需先卸载一次。生产用途请勿把私钥放进公开仓库。
 
 上游 Reminder 的纪念日代码仍保留在仓库中，主入口已切到定时器界面，两套代码互不干扰。
 
@@ -166,15 +166,15 @@ keyPassword=…
 ## 自动构建与发布
 
 - `.github/workflows/ci.yml`：推送到 `main` 和每个 Pull Request 都会跑单元测试、lint 和调试版构建。
-- `.github/workflows/release.yml`：推送 `v*` 标签时构建签名的发布版，创建 GitHub Release 并附上两个 APK 和 `SHA256SUMS`。标签必须和 `app/build.gradle.kts` 里的 `versionName` 一致，带 `-` 的标签（如 `v2.1.0-beta1`）会标成预发布。
+- `.github/workflows/release.yml`：推送 `v*` 标签、`repository_dispatch(build-release)` 或手动运行时构建签名的发布版，创建 GitHub Release 并附上三个 ABI APK 和 `SHA256SUMS`。标签必须和 `app/build.gradle.kts` 里的 `versionName` 一致，带 `-` 的标签（如 `v2.1.0-beta1`）会标成预发布。
+- `.github/workflows/build-apk.yml`：仅 `workflow_dispatch` 手动触发，构建签名 APK 并作为 artifact 上传，**不**发布 Release，避免和 release.yml 抢同一个 tag。
 
-发布工作流需要在仓库的 Settings → Secrets and variables → Actions 里配置三个 secret：
+发布工作流需要在仓库的 Settings → Secrets and variables → Actions 里配置两个 secret（密钥别名固定为 `reminder`，key 密码与 store 密码相同，由工作流从同一个 secret 派生）：
 
 | Secret                     | 内容                         |
 | -------------------------- | ---------------------------- |
 | `REMINDER_KEYSTORE_BASE64` | `release.jks` 的 base64 编码 |
-| `REMINDER_STORE_PASSWORD`  | keystore 密码                |
-| `REMINDER_KEY_PASSWORD`    | 密钥密码                     |
+| `REMINDER_STORE_PASSWORD`  | keystore / key 密码          |
 
 ## 测试
 
