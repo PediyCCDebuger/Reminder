@@ -352,6 +352,7 @@ class AtkReceiver : BroadcastReceiver() {
       }
 
       AtkEngine.ACTION_FIRE -> {
+        val pending = goAsync()
         val force = intent.getBooleanExtra(AtkEngine.EXTRA_FORCE, false)
         val item = if (id >= 0) store.get(id) else null
         AtkDiag.log(
@@ -385,6 +386,21 @@ class AtkReceiver : BroadcastReceiver() {
           engine.schedule(item)
           engine.refreshNext()
         }
+        // 3.4.0: 2.5s 看门狗。系统通过 FSI 把执行界面拉起来时，Activity 会标记 wasLaunched；
+        // 若 2.5s 内仍未被拉起（被 ROM 吞掉 FSI），再退而求其次直接启动（解锁后仍可见，亮屏
+        // 靠 Activity 自身唤醒锁兜底）。无论走哪条路，pending 都必须 finish 一次。
+        val wId = id
+        val wForce = intent.getBooleanExtra(AtkEngine.EXTRA_FORCE, false)
+        Handler(Looper.getMainLooper()).postDelayed({
+          try {
+            if (!AtkAlarmActivity.wasLaunched(wId)) {
+              AtkDiag.log(context, "执行界面: 2.5s 内 FSI 未拉起，启用直接启动兜底 id=$wId")
+              engine.launchAlarmFace(wId, wForce, dedupe = false)
+            }
+          } finally {
+            pending.finish()
+          }
+        }, 2500L)
       }
 
       "app.lentikr.reminder.ATK_SNOOZE_FIRE" -> {
@@ -481,6 +497,20 @@ class AtkReceiver : BroadcastReceiver() {
  */
 class AtkAlarmActivity : ComponentActivity() {
 
+  companion object {
+    @Volatile
+    private var launchedId = -1L
+    @Volatile
+    private var launchedAt = 0L
+    /** True when this alarm's 执行界面 was actually launched by the system (via FSI) recently. */
+    fun wasLaunched(id: Long): Boolean =
+      launchedId == id && System.currentTimeMillis() - launchedAt < 60_000L
+    fun markLaunched(id: Long) {
+      launchedId = id
+      launchedAt = System.currentTimeMillis()
+    }
+  }
+
   /** Held as state so a second alarm (onNewIntent) refreshes the visible task in place. */
   private val faceId = androidx.compose.runtime.mutableStateOf(-1L)
   private val faceForce = androidx.compose.runtime.mutableStateOf(false)
@@ -523,6 +553,7 @@ class AtkAlarmActivity : ComponentActivity() {
 
     faceId.value = intent.getLongExtra(AtkEngine.EXTRA_ID, -1L)
     faceForce.value = intent.getBooleanExtra(AtkEngine.EXTRA_FORCE, false)
+    markLaunched(faceId.value)
     AtkDiag.log(this, "执行界面: 打开 id=${faceId.value} force=${faceForce.value}")
 
     val item = loadItem(faceId.value)
@@ -677,6 +708,7 @@ class AtkAlarmActivity : ComponentActivity() {
     // Do NOT stop the tone here: the foreground service (and this surface's singleton player) may
     // legitimately keep ringing after the activity is dismissed. The explicit 终止 / 静音 / 贪睡
     // buttons stop it. A 10-minute hard cap in AtkAlarmSound bounds the worst case.
+    AtkDiag.log(this, "执行界面: onDestroy id=${faceId.value}")
     try {
       if (wakeLock?.isHeld == true) wakeLock?.release()
     } catch (e: Exception) {

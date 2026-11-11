@@ -43,8 +43,6 @@ class AtkAlarmService : Service() {
   private var foreground = false
   /** Avoid re-cancelling (and re-alerting) the same alarm when onCreate starts us again. */
   private var mountedId = -1L
-  /** Raise the 执行界面 once per service lifetime, so Activity -> service -> Activity cannot loop. */
-  private var faceRequested = false
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -121,13 +119,12 @@ class AtkAlarmService : Service() {
       AtkDiag.log(this, "svc: 无法进入前台，改为兜底 notify + 本进程播铃")
       engine.showNotification(item, fullScreen = true, force = force)
     }
-    // Now that the process is genuinely in the foreground, a direct launch is allowed again
-    // (Android 10+ blocks it from a background broadcast). Once per service lifetime plus
-    // launchAlarmFace's 8s dedupe stops any Activity -> service -> Activity loop.
-    if (!faceRequested) {
-      faceRequested = true
-      engine.launchAlarmFace(id, force, dedupe = true)
-    }
+    // 3.4.0: 不再由前台服务直接 startActivity 抢在 FSI 之前把执行界面拉起来。ColorOS 会以「后台
+    // 启动」方式打开这个 Activity，从而忽略 setTurnScreenOn(true)，造成「界面进入了窗口、onResume
+    // 也可见，但屏幕不亮」——这正是 3.2.0/3.3.0 日志里亮屏=true 却仍黑屏的根因。改为完全交给系统
+    // 通过全屏通知的 full-screen intent 来拉起 Activity：这是 Android 唯一能保证熄屏/锁屏时点亮
+    // 屏幕并盖在锁屏之上的官方路径。兜底直接启动改由 AtkReceiver 的 2.5s 看门狗负责（仅当 FSI 被
+    // ROM 吞掉时才退而求其次）。
 
     runCatching { AtkStore(this).log(id, 1, item.name) }
     runCatching { engine.schedule(item) }
@@ -250,7 +247,6 @@ class AtkAlarmService : Service() {
       currentId = -1L
     }
     mountedId = -1L
-    faceRequested = false
     stopSelf(startId)
   }
 

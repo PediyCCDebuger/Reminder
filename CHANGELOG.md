@@ -2,6 +2,20 @@
 
 每个 Release 的说明都取自本文件对应版本的小节，由打包工作流自动写入 GitHub Release。
 
+## [3.4.0] - 2026-11-11
+
+### 修复（真机日志定位：界面已 onResume 且 亮屏=true，但屏幕仍黑、且无声音）
+
+**根因**：3.3.0 的日志显示 `执行界面: Activity 创建 亮屏=true` 与 `onResume 已可见 亮屏=true`——Activity 确实被拉起、且 `PowerManager.isInteractive()` 也读到 `true`，但用户**既看不到也听不到**。结合「`svc: onDestroy（前台=true）` 约 1 秒后被拆」可知：界面是被**前台服务自己的 `startActivity` 直接拉起**的（后台启动），ColorOS 据此忽略 `setTurnScreenOn`，屏幕实际并未亮；随后整个进程 ~1 秒被系统拆掉，MediaPlayer 也随之消亡，于是既黑屏又无声。直接 `startActivity` 还抢在系统全屏通知的 **full-screen intent（FSI）** 之前，把本该点亮屏幕的那条官方路径压住了。
+
+**修复**：
+
+- **彻底改为由系统通过 FSI 拉起执行界面**。前台服务不再直接 `startActivity`；通知挂载 `setFullScreenIntent(Activity, true)` 后，**由 SystemUI 来启动 Activity**——这是 Android 唯一保证熄屏/锁屏时点亮屏幕并盖在锁屏之上的官方路径，依赖 `USE_FULL_SCREEN_INTENT` 权限（真机 `canUseFullScreenIntent()=true` 已确认）。`AtkAlarmActivity` 自带的 `setTurnScreenOn(true)` / `setShowWhenLocked(true)` / 亮屏唤醒锁作为双保险保留。
+- **2.5 秒看门狗兜底**：`AtkReceiver` 用 `goAsync()` 延长广播生命周期，若 2.5 秒内 `AtkAlarmActivity.wasLaunched()` 仍为 `false`（FSI 被 ROM 吞掉），再退而求其次直接启动（解锁后仍可见，亮屏靠 Activity 自身唤醒锁兜底）。`pending.finish()` 保证只调用一次。
+- 诊断新增 `执行界面: onDestroy id=…`，便于区分「界面正常存活」与「被系统/OEM 拆掉」：若 3.4.0 仍黑屏但日志里**没有** `onDestroy`，说明界面活着只是没亮（FSI 路径问题）；若**有** `onDestroy` 且发生在响铃后不久，说明进程被系统拆，需要开启 ColorOS 的「自启动 / 后台运行 / 锁屏显示」白名单。
+
+**注意**：3.3.0 的亮屏唤醒锁、复制/导出日志、编辑后询问激活等功能均保留。
+
 ## [3.3.0] - 2026-11-11
 
 ### 修复（真机日志定位：3.2.0 界面已拉起但屏幕仍黑）
