@@ -296,32 +296,32 @@ class AtkEngine(private val context: Context) {
     // 界面、压制 App 自己的 full-screen intent，FSI 因此被吞（3.4.0 日志「2.5s 内 FSI 未拉起」），
     // 界面只能靠看门狗的后台 startActivity 兜底，而那种启动方式在 ColorOS 上点不亮屏幕。
     // setAlarmClock 的「系统时钟显示下次闹钟」指示因此不再提供，但换取稳定亮屏。
-    setExactAlarm(ms, pi, item.name)
+    // 3.6.0：排程日志不再打印任务名（隐私），改为在 rescheduleAll 处汇总一行。
+    setExactAlarm(ms, pi, item.id)
   }
 
   /**
    * 3.5.0：与 SunriseAlarm 一致的精确闹钟阶梯。setExactAndAllowWhileIdle 是 doze 豁免、到点触发
    * 的精确闹钟；精确闹钟权限缺失时降级到 setAndAllowWhileIdle，再不行用普通 set。返回是否成功排程。
+   * 3.6.0：排程日志不再打印任务名（隐私保护）；正常设定静默，仅在降级/失败时记录，且不带任务名。
    */
-  private fun setExactAlarm(ms: Long, pi: PendingIntent, name: String): Boolean {
+  private fun setExactAlarm(ms: Long, pi: PendingIntent, id: Long): Boolean {
+    val tag = "#$id"
     return try {
       alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, ms, pi)
-      AtkDiag.log(context, "排程: setExactAndAllowWhileIdle 已设定 id=$name @$ms")
       true
     } catch (e: SecurityException) {
       AtkDiag.log(context, "排程: setExactAndAllowWhileIdle 被拒（${e.message}），降级 setAndAllowWhileIdle")
       try {
         alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, ms, pi)
-        AtkDiag.log(context, "排程: setAndAllowWhileIdle 已设定 id=$name")
         true
       } catch (e2: SecurityException) {
         AtkDiag.log(context, "排程: setAndAllowWhileIdle 也被拒（${e2.message}），降级 set")
         try {
           alarms.set(AlarmManager.RTC_WAKEUP, ms, pi)
-          AtkDiag.log(context, "排程: set 已设定 id=$name")
           true
         } catch (e3: SecurityException) {
-          AtkDiag.log(context, "排程: 全部失败，任务 $name 无法定时")
+          AtkDiag.log(context, "排程: 全部失败，任务 $tag 无法定时")
           false
         }
       }
@@ -351,7 +351,8 @@ class AtkEngine(private val context: Context) {
     val pi = fireIntent(id, (id * 7 + 13).toInt(), force = true)
     val at = System.currentTimeMillis() + 60_000L
     AtkDiag.log(context, "排程: 60 秒后真实触发测试 id=$id")
-    setExactAlarm(at, pi, "测试$id")
+    // 3.6.0：第三个参数必须是 Long（任务 id），此前误传字符串「测试$id」会编译失败。
+    setExactAlarm(at, pi, id)
   }
 
   /**
@@ -419,10 +420,18 @@ class AtkEngine(private val context: Context) {
 
   fun rescheduleAll() {
     val items = try { store.all() } catch (e: Exception) { emptyList() }
+    var scheduled = 0
     for (item in items) {
-      try { schedule(item) } catch (e: Exception) { }
+      try {
+        val before = nextMillis(item)
+        schedule(item)
+        // 仅统计真正排上了（启用且下次时间有效）的任务，用于一行汇总，不打印任务名。
+        if (item.enabled && before > 0) scheduled++
+      } catch (e: Exception) { }
     }
     try { showNextNotification(items) } catch (e: Exception) { }
+    // 3.6.0：单行汇总，不再逐条打印任务名（隐私），也不在多调用点重复列出全部任务。
+    AtkDiag.log(context, "排程: 已处理 ${items.size} 条任务（其中 $scheduled 条已排程）")
   }
 
   private fun alarmActivityIntent(id: Long, code: Int, force: Boolean = false): PendingIntent =

@@ -357,7 +357,7 @@ class AtkReceiver : BroadcastReceiver() {
         val item = if (id >= 0) store.get(id) else null
         AtkDiag.log(
           context,
-          "触发 id=$id 任务=${item?.name ?: "查不到"} 启用=${item?.enabled} force=$force",
+          "触发 id=$id 启用=${item?.enabled} force=$force",
         )
         if (item != null && (item.enabled || force)) {
           // 3.1.0 ROOT-CAUSE FIX. 3.0.0 posted the full-screen notification from THIS
@@ -377,30 +377,18 @@ class AtkReceiver : BroadcastReceiver() {
           //    play() also acquires the CPU wake lock for the whole ringing period.
           AtkAlarmSound.play(context, item)
           // 2) Start the FGS; IT mounts the full-screen notification via startForeground()
-          //    and, once the process is foreground, raises the 执行界面 as a fallback.
-          //    A direct startActivity here from the background is silently dropped on
-          //    Android 10+ and would only consume the dedupe window.
+          //    AND directly starts the 执行界面 (3.6.0: see AtkAlarmService). A foreground
+          //    process launch is the only path ColorOS honours for turning the screen on.
           startAlarmService(context, engine, id, force)
-          AtkDiag.log(context, "全屏通知: 已交给前台服务挂载 id=$id")
+          AtkDiag.log(context, "全屏通知: 已交给前台服务挂载并直接拉起执行界面 id=$id")
           store.log(id, 1, item.name)
           engine.schedule(item)
           engine.refreshNext()
         }
-        // 3.4.0: 2.5s 看门狗。系统通过 FSI 把执行界面拉起来时，Activity 会标记 wasLaunched；
-        // 若 2.5s 内仍未被拉起（被 ROM 吞掉 FSI），再退而求其次直接启动（解锁后仍可见，亮屏
-        // 靠 Activity 自身唤醒锁兜底）。无论走哪条路，pending 都必须 finish 一次。
-        val wId = id
-        val wForce = intent.getBooleanExtra(AtkEngine.EXTRA_FORCE, false)
-        Handler(Looper.getMainLooper()).postDelayed({
-          try {
-            if (!AtkAlarmActivity.wasLaunched(wId)) {
-              AtkDiag.log(context, "执行界面: 2.5s 内 FSI 未拉起，启用直接启动兜底 id=$wId")
-              engine.launchAlarmFace(wId, wForce, dedupe = false)
-            }
-          } finally {
-            pending.finish()
-          }
-        }, 2500L)
+        // 3.6.0：移除 2.5s 看门狗。直接拉起改由前台服务（处于前台的进程）同步完成，不再依赖被
+        // ColorOS 吞掉的 FSI、也不再由本广播延迟兜底。goAsync 的 CPU 窗口在启动前台服务后立即结束；
+        // 铃声/CPU 唤醒锁由 AtkAlarmSound 持有，前台服务继续保活。
+        pending.finish()
       }
 
       "app.lentikr.reminder.ATK_SNOOZE_FIRE" -> {
@@ -490,11 +478,11 @@ class AtkReceiver : BroadcastReceiver() {
 }
 
 /**
- * Full-screen alarm surface. It is **launched by SystemUI** through the full-screen intent of
- * the HIGH-importance notification the broadcast receiver posts (setFullScreenIntent), not by
- * `setAlarmClock()` and not by a background `startActivity()` — both of which OnePlus/ColorOS
- * block. This mirrors SunriseAlarm and Smart Alarm, the two apps verified working on the test
- * device. 测试执行 opens it directly from the foreground as before.
+ * Full-screen alarm surface. 3.6.0 起它的主拉起路径是**前台服务直接 startActivity**（对齐 Smart
+ * Alarm-v2.7.7，本机验证可用）：前台进程发起的启动不会被 ColorOS 当成后台启动，配合本 Activity 的
+ * setShowWhenLocked + setTurnScreenOn + 屏幕唤醒锁即可可靠点亮屏幕并盖在锁屏之上。setFullScreenIntent
+ * 通知仅作兜底（本机实测被吞，故不再依赖）。`setAlarmClock()` 与「广播里直接 startActivity」两种做法
+ * OnePlus/ColorOS 都会拦截，已弃用。测试执行仍从 APP 前台直接打开本界面。
  *
  * It plays the tone itself (idempotent) and starts the foreground service for the persistent
  * notification + re-arm; dismissing this surface therefore does not silence an alarm the service
@@ -507,9 +495,9 @@ class AtkAlarmActivity : ComponentActivity() {
     private var launchedId = -1L
     @Volatile
     private var launchedAt = 0L
-    /** True when this alarm's 执行界面 was actually launched by the system (via FSI) recently. */
-    fun wasLaunched(id: Long): Boolean =
-      launchedId == id && System.currentTimeMillis() - launchedAt < 60_000L
+    /** Records that this alarm's 执行界面 was launched, used to dedupe re-launches from the
+     *  foreground service (3.6.0: the service launches directly; the activity's own onCreate may
+     *  re-enter the service, so we skip a second launch within the gap window). */
     fun markLaunched(id: Long) {
       launchedId = id
       launchedAt = System.currentTimeMillis()

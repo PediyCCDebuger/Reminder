@@ -2,6 +2,22 @@
 
 每个 Release 的说明都取自本文件对应版本的小节，由打包工作流自动写入 GitHub Release。
 
+## [3.6.0] - 2026-11-12
+
+### 修复（真机日志定位 + 逆向 Smart Alarm-v2.7.7：FSI 被吞，须由前台服务直接 startActivity）
+
+**根因**：3.5.0 仍把 `setFullScreenIntent`（FSI）当主路径、仅用 2.5s 看门狗兜底。但本机 ColorOS / 一加 13 **连 FSI 一并吞掉**，于是「到点不亮屏、要解锁点通知才响」；而看门狗从广播侧的 `Handler` 延迟 `startActivity`，仍被当成后台启动，叠进 `MainActivity` 任务栈，造成「点通知先进主界面 → 后台响铃 → 再进执行界面」的回归。逆向本机可用的 Smart Alarm-v2.7.7 确认：它**根本不用 FSI**，而是由前台服务 `LaunchAlarm` 在 `startForeground` 之后**直接 `startActivity` 拉起 `AlarmActivity`**（flags=NEW_TASK|CLEAR_TASK），Activity 自身 `setShowWhenLocked`+`setTurnScreenOn`+屏幕唤醒锁负责点亮屏幕——这才是本机可靠路径。
+
+**修复**：
+
+- **主路径改为前台服务直接拉起执行界面**（对齐 Smart Alarm）。`AtkAlarmService.onStartCommand` 在 `enterForeground()` 之后立即 `engine.launchAlarmFace(id, force, dedupe=true)` 拉起 `AtkAlarmActivity`；前台进程发起的启动不被 ColorOS 当后台启动，`setTurnScreenOn` + 屏幕唤醒锁可可靠点亮屏幕并盖在锁屏之上。
+- **移除 `AtkReceiver` 的 2.5s 看门狗**：直接拉起由前台服务同步完成，`goAsync` 的 `pending` 在启动前台服务后立即 `finish()`。消除「先进主界面」的回归。
+- **FSI 通知降级为纯兜底**：`enterForeground()` 仍挂载全屏通知，但被吞也不影响主路径。
+- **日志隐私与去重**：排程日志不再逐条打印任务名（隐私），`rescheduleAll()` 改为单行汇总「已处理 N 条任务（其中 M 条已排程）」；触发/服务诊断日志去除任务名。消除「排程里列出我全部任务、还多次重复」的问题。
+- 排程仍用 `setExactAndAllowWhileIdle()`（对齐 SunriseAlarm，3.5.0 已修的 `setAlarmClock` 压制 FSI 根因保留）。
+
+**说明**：编辑后询问激活、日志复制/保存/刷新、亮屏唤醒锁等能力均保留。若个别 ROM 仍吞掉前台服务的 `startActivity`，下一步启用已声明的 `SYSTEM_ALERT_WINDOW` 悬浮窗兜底。
+
 ## [3.5.0] - 2026-11-11
 
 ### 修复（真机日志定位：FSI 被吞，3.4.0「2.5s 内 FSI 未拉起」）

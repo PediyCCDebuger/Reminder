@@ -19,8 +19,12 @@ import android.os.PowerManager
  * Posting the notification from the background broadcast (3.0.0) was silently downgraded by
  * Android 12+/ColorOS, so the 执行界面 never came up over the keyguard.
  *
- * Once foreground, this service also raises the 执行界面 directly as a fallback; the dedupe
- * flag on [AtkEngine.launchAlarmFace] prevents an Activity -> Service -> Activity loop.
+ * 3.6.0 根因修复（对齐 Smart Alarm-v2.7.7，本机验证可用）：ColorOS / 一加 13 连 setFullScreenIntent
+ * 一并吞掉，导致 3.4.0/3.5.0 一直「到点不亮屏、要解锁点通知才响」。Smart Alarm 在本机可用，关键在
+ * 于它**不用 FSI**，而是由前台服务（LaunchAlarm）在 startForeground 之后**直接 startActivity**
+ * 拉起 AlarmActivity（flags=NEW_TASK|CLEAR_TASK），Activity 自身 setShowWhenLocked +
+ * setTurnScreenOn + 屏幕唤醒锁负责点亮屏幕并盖在锁屏之上。因此本服务改为：进入前台后**立即直接
+ * 拉起执行界面**作为主路径，FSI 通知仅作兜底（被吞也不影响）。
  *
  * Failure modes are made visible instead of silent: every startForeground attempt, the sound
  * start, the activity launch and the re-arm are written to [AtkDiag] so 权限自检 → 诊断日志 can
@@ -79,9 +83,9 @@ class AtkAlarmService : Service() {
       if (force) {
         // 60 秒后真实触发 explicitly forces the ring chain even on a disabled task, so the user
         // can verify 响铃 / 渐响 / 执行界面 without first enabling it.
-        AtkDiag.log(this, "svc: 任务已停用，但 60 秒测试强制触发 id=$id（base[10]=${item.base.getOrNull(10) ?: "?"}, 名称=${item.name}）")
+        AtkDiag.log(this, "svc: 任务已停用，但 60 秒测试强制触发 id=$id（base[10]=${item.base.getOrNull(10) ?: "?"]}）")
       } else {
-        AtkDiag.log(this, "svc: 任务已停用 id=$id（base[10]=${item.base.getOrNull(10) ?: "?"}, 名称=${item.name}）")
+        AtkDiag.log(this, "svc: 任务已停用 id=$id（base[10]=${item.base.getOrNull(10) ?: "?"]}）")
         stopEverything(startId)
         return START_NOT_STICKY
       }
@@ -119,12 +123,13 @@ class AtkAlarmService : Service() {
       AtkDiag.log(this, "svc: 无法进入前台，改为兜底 notify + 本进程播铃")
       engine.showNotification(item, fullScreen = true, force = force)
     }
-    // 3.4.0: 不再由前台服务直接 startActivity 抢在 FSI 之前把执行界面拉起来。ColorOS 会以「后台
-    // 启动」方式打开这个 Activity，从而忽略 setTurnScreenOn(true)，造成「界面进入了窗口、onResume
-    // 也可见，但屏幕不亮」——这正是 3.2.0/3.3.0 日志里亮屏=true 却仍黑屏的根因。改为完全交给系统
-    // 通过全屏通知的 full-screen intent 来拉起 Activity：这是 Android 唯一能保证熄屏/锁屏时点亮
-    // 屏幕并盖在锁屏之上的官方路径。兜底直接启动改由 AtkReceiver 的 2.5s 看门狗负责（仅当 FSI 被
-    // ROM 吞掉时才退而求其次）。
+    // 3.6.0 主路径（对齐 Smart Alarm）：前台进程直接 startActivity 拉起执行界面。本机 ColorOS 连
+    // FSI 都吞，但 Smart Alarm 用「前台服务直接 startActivity」在本机可用——前台进程发起的启动
+    // 不会被当成后台启动，setTurnScreenOn + 屏幕唤醒锁（见 AtkAlarmActivity）能可靠点亮屏幕并盖在
+    // 锁屏之上。dedupe=true 避免 Activity 自身 onCreate 又回头启动本服务时二次拉起造成闪屏。
+    // FSI 通知（上方 startForeground 挂载）仅作兜底：被吞则静默失效，不影响本路径。
+    engine.launchAlarmFace(id, force, dedupe = true)
+    AtkDiag.log(this, "svc: 已直接拉起执行界面 id=$id（FSI 仅兜底，全屏权限=${engine.canUseFullScreenIntent()}）")
 
     runCatching { AtkStore(this).log(id, 1, item.name) }
     runCatching { engine.schedule(item) }
