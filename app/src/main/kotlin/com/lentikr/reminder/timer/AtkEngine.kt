@@ -5,11 +5,11 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import androidx.core.app.NotificationCompat
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
-import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import cn.nnci.addintimer.Occurrence
@@ -390,9 +390,9 @@ class AtkEngine(private val context: Context) {
    * foreground service at all is what keeps the tone alive.
    */
   fun buildFallbackNotification(item: AtkItem): Notification {
-    ensureChannel()
-    val open = alarmActivityIntent(item.id, (item.id * 7 + 3).toInt())
-    val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      ensureChannel()
+      val open = alarmActivityIntent(item.id, (item.id * 7 + 11).toInt())
+      val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       Notification.Builder(context, CHANNEL_STATUS)
     } else {
       @Suppress("DEPRECATION") Notification.Builder(context)
@@ -446,33 +446,33 @@ class AtkEngine(private val context: Context) {
    * posted from the background broadcast. Android 12+ only honours a full-screen intent when
    * the notification comes from an app that is actually in the foreground.
    *
-   * 3.0.0's `setOnlyAlertOnce(true)` was the decisive bug: "only alert once" suppresses the
-   * heads-up / full-screen intent on any re-post, which is exactly what an alarm needs. It is
-   * removed here. Loop prevention is instead handled by [launchAlarmFace]'s dedupe flag.
+   * 3.2.0 根因修复：3.1.0 参照 Smart Alarm 逆向结果给这条通知加了 `headsup=2` 的 extra。但在
+   * ColorOS / 一加 13 上，这个 extra 会被当成「只弹顶部横幅（heads-up）」的强指令，把本应全屏
+   * 的锁屏闹钟界面降级成一条小横幅——本机反复「只出通知、不亮屏、要解锁点通知才响」正是它造成的。
+   * 同机的 SunriseAlarm 能用，靠的就是「不设这个 extra、只用 PRIORITY_HIGH + setFullScreenIntent、
+   * 用 NotificationCompat 构建」。本次去掉 headsup，改用 NotificationCompat.PRIORITY_HIGH，并对齐
+   * SunriseAlarm 的通知写法；循环防护仍交给 [launchAlarmFace] 的 dedupe 标志。
+   *
+   * 注意：不要再加 setOnlyAlertOnce（会抑制 full-screen intent），也不要再加任何 headsup extra。
    */
   fun buildAlarmNotification(item: AtkItem, force: Boolean = false): Notification {
     ensureChannel()
     val full = alarmActivityIntent(item.id, (item.id * 7 + 3).toInt(), force)
     val snooze = actionIntent(ACTION_SNOOZE, item.id, (item.id * 7 + 4).toInt())
     val stop = actionIntent(ACTION_STOP, item.id, (item.id * 7 + 5).toInt())
-    val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      Notification.Builder(context, CHANNEL_ALARM_V4)
-    } else {
-      @Suppress("DEPRECATION") Notification.Builder(context)
-    }
+    // 与 SunriseAlarm 完全一致：NotificationCompat + PRIORITY_HIGH + 无 headsup extra。
+    // 全屏 intent 的 PendingIntent 专用 request code (id*7+3)，避免被下面「测试执行 / 兜底」通知
+    // 用 FLAG_UPDATE_CURRENT 覆盖掉 extra（导致 force 状态错乱）。
+    val builder = NotificationCompat.Builder(context, CHANNEL_ALARM_V4)
     return builder
       .setSmallIcon(R.drawable.ic_atk_stat)
       .setContentTitle(item.name.ifBlank { "定时提醒" })
       .setContentText(alarmBody(item))
-      .setStyle(Notification.BigTextStyle().bigText(alarmBody(item)))
-      .setPriority(Notification.PRIORITY_MAX)
-      .setCategory(Notification.CATEGORY_ALARM)
-      .setVisibility(Notification.VISIBILITY_PUBLIC)
-      .setAutoCancel(false)
+      .setStyle(NotificationCompat.BigTextStyle().bigText(alarmBody(item)))
+      .setPriority(NotificationCompat.PRIORITY_HIGH)
+      .setCategory(NotificationCompat.CATEGORY_ALARM)
+      .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
       .setOngoing(true)
-      // Smart Alarm sets this extra to force a heads-up on ROMs that gate full-screen intents
-      // behind one (it was visible in LaunchAlarm.launchalarm's bytecode). Harmless elsewhere.
-      .setExtras(Bundle().apply { putInt("headsup", 2) })
       .setContentIntent(full)
       .setFullScreenIntent(full, true)
       .addAction(R.drawable.ic_atk_stat, "贪睡 10 分钟", snooze)
@@ -501,7 +501,7 @@ class AtkEngine(private val context: Context) {
       buildAlarmNotification(item, force)
     } else {
       ensureChannel()
-      val open = alarmActivityIntent(item.id, (item.id * 7 + 3).toInt(), force)
+      val open = alarmActivityIntent(item.id, (item.id * 7 + 11).toInt(), force)
       val stop = actionIntent(ACTION_STOP, item.id, (item.id * 7 + 5).toInt())
       val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
         Notification.Builder(context, CHANNEL_STATUS)

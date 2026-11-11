@@ -2,6 +2,30 @@
 
 每个 Release 的说明都取自本文件对应版本的小节，由打包工作流自动写入 GitHub Release。
 
+## [3.2.0] - 2026-11-11
+
+### 修复（真机日志定位：锁屏仍不执行，3.1.0 未解决）
+
+**根因**：3.1.0 在对照 Smart Alarm 逆向结果（`LaunchAlarm.launchalarm` 字节码里能看到 `headsup` extra）后，给闹钟通知加了 `.setExtras(Bundle().apply { putInt("headsup", 2) })` 并用了 `PRIORITY_MAX`。但在 ColorOS / 一加 13 上，这个 `headsup` extra 会被当成「只弹顶部横幅（heads-up）」的强指令，**把本应全屏的锁屏闹钟界面降级成一条小横幅**——这正是本机反复「只出通知、不亮屏、要解锁点通知才响」的真正原因。同机的 SunriseAlarm 能用，靠的是「不设 headsup extra、只用 `PRIORITY_HIGH` + `setFullScreenIntent`、用 `NotificationCompat` 构建」。
+
+**修复**（对齐本机验证可用的 SunriseAlarm）：
+
+- 去掉 `headsup` extra，改用 `NotificationCompat.Builder` + `NotificationCompat.PRIORITY_HIGH` 构建闹钟全屏通知，`setFullScreenIntent` 与 `CATEGORY_ALARM` / `VISIBILITY_PUBLIC` 保持不变；`setOnlyAlertOnce` 仍不加。
+- 全屏 intent 的 `PendingIntent` 改用**专用 request code**（`id*7+3`），不再与「测试执行 / 兜底」通知（`id*7+11`）共用 `FLAG_UPDATE_CURRENT`，避免后者把 `force` extra 覆盖错乱。
+- `AtkAlarmActivity` 去掉 `launchMode="singleTop"`（与 SunriseAlarm 的 launcher Activity 一致，避免 singleTop 任务栈干扰全屏 intent 在锁屏上的拉起）。
+- 诊断日志新增「执行界面: Activity 创建 锁屏=… 置顶=…」与「执行界面: onResume 已可见」，下次可直接看出**界面到底有没有被系统真正拉起来、当时是否锁屏**：有这两条但屏幕黑 → 渲染/主题问题；连这两条都没有 → FSI / 后台 startActivity 被系统或 OEM 拦下。
+
+### 新增
+
+- **触发日志可复制 / 可导出**：权限自检 → 触发日志，底部新增「复制」（写入剪贴板）与「保存」（用系统文件选择器导出为 `.txt`），长屏截不全时也能把日志完整带走排查。
+- **编辑任务后询问是否激活**：保存一个停用的任务（新建或编辑均适用）后，弹出「是否激活此任务」选择「激活 / 暂不激活」；已激活的任务不弹此询问。
+
+### 注意
+
+- 锁屏可用性仍依赖系统权限：请在「系统设置 → 服务状态 → 权限自检」确认「全屏通知」「精确闹钟」「通知权限」「忽略电池优化」均开启；ColorOS 还需允许自启动、后台运行、锁屏显示、电池策略不限制。
+- 若 3.2.0 仍不到点：先看「触发日志」里有没有「执行界面: Activity 创建 / onResume」——据此区分是通知没发出来、还是 ROM 拦了全屏界面（后者下一步会加 `SYSTEM_ALERT_WINDOW` 悬浮窗兜底，本版已申请该权限）。
+- 3.2.0 沿用此前签名密钥，可直接覆盖安装。
+
 ## [3.1.0] - 2026-11-11
 
 ### 修复（真机日志定位：锁屏 / 退出 APP 仍不执行，3.0.0 未解决）

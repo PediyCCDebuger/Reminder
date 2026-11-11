@@ -1,6 +1,7 @@
 package com.lentikr.reminder.timer
 
 import android.app.AlarmManager
+import android.app.KeyguardManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -504,6 +505,15 @@ class AtkAlarmActivity : ComponentActivity() {
     androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
     // Theme.Reminder.Alarm already sets black system bars with light icons.
 
+    // 3.2.0 诊断：确认「执行界面」到底有没有被系统真正拉起来、当时是否锁屏。如果这条日志出现
+    // 但屏幕仍是黑的，说明是渲染 / 主题问题；如果连这条都没有，说明 FSI / 后台 startActivity 被
+    // 系统或 OEM 拦下，需要走 SYSTEM_ALERT_WINDOW 悬浮窗兜底（下个版本）。
+    try {
+      val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+      AtkDiag.log(this, "执行界面: Activity 创建 锁屏=${km.isKeyguardLocked} 置顶=${isTaskRoot}")
+    } catch (e: Exception) {
+    }
+
     faceId.value = intent.getLongExtra(AtkEngine.EXTRA_ID, -1L)
     faceForce.value = intent.getBooleanExtra(AtkEngine.EXTRA_FORCE, false)
     AtkDiag.log(this, "执行界面: 打开 id=${faceId.value} force=${faceForce.value}")
@@ -635,6 +645,11 @@ class AtkAlarmActivity : ComponentActivity() {
     val item = loadItem(newId) ?: return
     AtkAlarmSound.play(this, item)
     startAlarmService(newId, faceForce.value)
+  }
+
+  override fun onResume() {
+    super.onResume()
+    AtkDiag.log(this, "执行界面: onResume 已可见 id=${faceId.value}")
   }
 
   override fun onDestroy() {

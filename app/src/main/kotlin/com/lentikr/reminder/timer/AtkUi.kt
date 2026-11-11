@@ -1,5 +1,7 @@
 package com.lentikr.reminder.timer
 
+import android.content.ClipboardManager
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -54,6 +56,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import cn.nnci.addintimer.Occurrence
 import com.lentikr.reminder.R
+import java.nio.charset.Charsets
 import java.text.SimpleDateFormat
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -91,6 +94,7 @@ fun TimerApp() {
     var importUri by remember { mutableStateOf<Uri?>(null) }
     var contextItem by remember { mutableStateOf<AtkItem?>(null) }
     var deleteTarget by remember { mutableStateOf<AtkItem?>(null) }
+    var activateTarget by remember { mutableStateOf<AtkItem?>(null) }
     var planItem by remember { mutableStateOf<AtkItem?>(null) }
     var logItem by remember { mutableStateOf<AtkItem?>(null) }
     var moveItem by remember { mutableStateOf<AtkItem?>(null) }
@@ -262,6 +266,8 @@ fun TimerApp() {
             store.save(item)
             refresh()
             screen = Screen.LIST
+            // 3.2.0：保存一个停用的任务后，询问是否立即激活（新建或编辑停用任务都会触发）。
+            if (!item.enabled) activateTarget = item
           },
           onClose = { screen = Screen.LIST },
           onMessage = { message = it },
@@ -439,6 +445,23 @@ fun TimerApp() {
           deleteTarget = null
         },
         dismissText = "取消",
+      )
+    }
+
+    activateTarget?.let { actItem ->
+      AtkChoiceDialog(
+        title = "是否激活此任务",
+        options = listOf("激活", "暂不激活"),
+        selected = -1,
+        onPick = { which ->
+          activateTarget = null
+          if (which == 0) {
+            store.setEnabled(actItem.id, true)
+            refresh()
+            toast(context, "已激活「${actItem.name.ifBlank { "未命名" }}」")
+          }
+        },
+        onDismiss = { activateTarget = null },
       )
     }
 
@@ -1066,8 +1089,25 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
   val context = LocalContext.current
   var version by remember { mutableIntStateOf(0) }
   var showLog by remember { mutableStateOf(false) }
-  var logText by remember { mutableStateOf("") }
+  // 用稳定 MutableState 持有日志文本，保存回调无论何时触发都能读到最新内容（避免闭包捕获旧值）。
+  val logTextState = remember { mutableStateOf("") }
   val report = remember(version) { engine.permissionReport() }
+  // 3.2.0：长屏截不全时，可直接复制或导出触发日志，便于排查「锁屏不响」。
+  val clipboard = remember { context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager }
+  val saveLogLauncher = rememberLauncherForActivityResult(
+    ActivityResultContracts.CreateDocument("text/plain"),
+  ) { uri ->
+    if (uri != null) {
+      try {
+        context.contentResolver.openOutputStream(uri)?.use { os ->
+          os.write(logTextState.value.toByteArray(Charsets.UTF_8))
+        }
+        toast(context, "已保存触发日志到文件")
+      } catch (e: Exception) {
+        toast(context, "保存失败：" + e.message)
+      }
+    }
+  }
   Column(Modifier.fillMaxSize()) {
     AtkTitleBar("权限自检", onBack = onBack)
     LazyColumn(Modifier.weight(1f)) {
@@ -1093,7 +1133,7 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
       item { AtkSection("诊断") }
       item {
         AtkSettingRow("触发日志", "最近 200 条：触发 / 前台服务 / 播铃 / 执行界面", onClick = {
-          logText = AtkDiag.text(context)
+          logTextState.value = AtkDiag.text(context)
           showLog = true
         })
       }
@@ -1123,9 +1163,9 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
           .navigationBarsPadding(),
       ) {
         AtkDialogTitle("触发日志")
-        val lines = logText.split("\n")
+        val lines = logTextState.value.split("\n")
         val listState = rememberLazyListState()
-        LaunchedEffect(logText) {
+        LaunchedEffect(logTextState.value) {
           if (lines.isNotEmpty()) listState.scrollToItem(lines.lastIndex)
         }
         LazyColumn(
@@ -1144,11 +1184,26 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
         Row(Modifier.fillMaxWidth().background(Color(0xFFD2D2D2)).padding(8.dp)) {
           AtkPlainButton("清空", Modifier.weight(1f)) {
             AtkDiag.clear(context)
-            logText = AtkDiag.text(context)
+            logTextState.value = AtkDiag.text(context)
           }
-          Spacer(Modifier.width(8.dp))
-          AtkPlainButton("刷新", Modifier.weight(1f)) { logText = AtkDiag.text(context) }
-          Spacer(Modifier.width(8.dp))
+          Spacer(Modifier.width(6.dp))
+          AtkPlainButton("复制", Modifier.weight(1f)) {
+            try {
+              clipboard.setPrimaryClip(ClipData.newPlainText("触发日志", logTextState.value))
+              toast(context, "已复制触发日志")
+            } catch (e: Exception) {
+              toast(context, "复制失败：" + e.message)
+            }
+          }
+          Spacer(Modifier.width(6.dp))
+          AtkPlainButton("保存", Modifier.weight(1f)) {
+            val name = "AddinTimer_触发日志_" +
+              SimpleDateFormat("yyyyMMddHHmmss", Locale.CHINA).format(Date()) + ".txt"
+            saveLogLauncher.launch(name)
+          }
+          Spacer(Modifier.width(6.dp))
+          AtkPlainButton("刷新", Modifier.weight(1f)) { logTextState.value = AtkDiag.text(context) }
+          Spacer(Modifier.width(6.dp))
           AtkPlainButton("关闭", Modifier.weight(1f)) { showLog = false }
         }
       }
