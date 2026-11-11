@@ -56,7 +56,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import cn.nnci.addintimer.Occurrence
 import com.lentikr.reminder.R
-import java.nio.charset.Charsets
 import java.text.SimpleDateFormat
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
@@ -1100,7 +1099,7 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
     if (uri != null) {
       try {
         context.contentResolver.openOutputStream(uri)?.use { os ->
-          os.write(logTextState.value.toByteArray(Charsets.UTF_8))
+          os.write(logTextState.value.toByteArray())
         }
         toast(context, "已保存触发日志到文件")
       } catch (e: Exception) {
