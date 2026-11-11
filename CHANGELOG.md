@@ -2,6 +2,22 @@
 
 每个 Release 的说明都取自本文件对应版本的小节，由打包工作流自动写入 GitHub Release。
 
+## [3.3.0] - 2026-11-11
+
+### 修复（真机日志定位：3.2.0 界面已拉起但屏幕仍黑）
+
+**根因**：3.2.0 的日志证明「执行界面」Activity 已被系统真正创建并 `onResume`（可见），但当时 `锁屏=false`——说明设备是**睡着了但没锁屏**（ColorOS 默认「熄屏不立即锁屏」）。问题在于 Activity 是由本 App 自己的前台服务用 `startActivity` 直接拉起的，而不是 SystemUI 通过全屏 intent 拉起；在这种拉起路径下，ColorOS / 一加 13 **无视** `setTurnScreenOn(true)` / `FLAG_TURN_SCREEN_ON` 这个「亮屏」提示，于是 Activity 虽在窗口管理器里可见、屏幕却一直是黑的，用户什么也看不到。
+
+**修复**：
+
+- `AtkAlarmActivity` 改用 `PowerManager.SCREEN_BRIGHT_WAKE_LOCK | ACQUIRE_CAUSES_WAKEUP` 获取屏幕唤醒锁（在 `onCreate` 最前面、读取任务之前就获取），这是**跨 OEM 真正能强制点亮并保持屏幕常亮**的做法，不再依赖被 ColorOS 吞掉的 `setTurnScreenOn` 提示。`window` 上的 `FLAG_KEEP_SCREEN_ON` 保留，配合它保持亮屏直到用户关闭闹钟。
+- 诊断日志新增「亮屏」字段：`Activity 创建 … 亮屏=…` 与 `onResume 已可见 … 亮屏=…`。3.3.0 后若 `onResume` 的 `亮屏` 仍为 `false`，才说明 OEM 连唤醒锁都吞了，那时再上 `SYSTEM_ALERT_WINDOW` 悬浮窗兜底（Manifest 已声明该权限）。
+
+### 说明
+
+- 3.2.0 日志里的 `svc: onDestroy（前台=true）`（前台服务约 1 秒后被系统/ROM 拆掉）**不影响本次修复**：响铃由 `AtkAlarmSound` 的 `MediaPlayer` 自带 `PARTIAL_WAKE_LOCK` 保活，屏幕由本 Activity 的亮屏唤醒锁保活；前台服务被拆只是少了状态栏那条常驻通知，闹钟界面与铃声都还在。
+- 锁屏可用性仍依赖系统权限：请在「系统设置 → 服务状态 → 权限自检」确认「全屏通知」「精确闹钟」「通知权限」「忽略电池优化」均开启；ColorOS 还需允许自启动、后台运行、锁屏显示、电池策略不限制。
+
 ## [3.2.0] - 2026-11-11
 
 ### 修复（真机日志定位：锁屏仍不执行，3.1.0 未解决）

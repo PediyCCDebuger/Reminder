@@ -508,9 +508,16 @@ class AtkAlarmActivity : ComponentActivity() {
     // 3.2.0 诊断：确认「执行界面」到底有没有被系统真正拉起来、当时是否锁屏。如果这条日志出现
     // 但屏幕仍是黑的，说明是渲染 / 主题问题；如果连这条都没有，说明 FSI / 后台 startActivity 被
     // 系统或 OEM 拦下，需要走 SYSTEM_ALERT_WINDOW 悬浮窗兜底（下个版本）。
+    // 3.3.0：新增「亮屏」诊断。锁屏=false 且亮屏=false = 设备睡着了但没锁屏，本应被亮屏唤醒锁
+    // 点亮；若 3.3.0 后 onResume 的 亮屏 仍为 false，才是 OEM 连唤醒锁都吞了，届时再上悬浮窗兜底。
+    acquireWakeLock()
     try {
       val km = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
-      AtkDiag.log(this, "执行界面: Activity 创建 锁屏=${km.isKeyguardLocked} 置顶=${isTaskRoot}")
+      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+      val interactive =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) pm.isInteractive
+        else @Suppress("DEPRECATION") pm.isScreenOn
+      AtkDiag.log(this, "执行界面: Activity 创建 锁屏=${km.isKeyguardLocked} 置顶=${isTaskRoot} 亮屏=$interactive")
     } catch (e: Exception) {
     }
 
@@ -530,7 +537,6 @@ class AtkAlarmActivity : ComponentActivity() {
       return
     }
 
-    acquireWakeLock()
     // Play the tone immediately, straight from this (foreground, lock-screen) activity. The tone
     // is a process-wide singleton, so it keeps ringing even if this surface is dismissed while the
     // foreground service — and its notification — are still up.
@@ -628,8 +634,18 @@ class AtkAlarmActivity : ComponentActivity() {
     if (wakeLock != null) return
     try {
       val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-      wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AddinTimer:alarm_face")
-        .apply { setReferenceCounted(false); acquire(20 * 60 * 1000L) }
+      // 3.3.0 根因修复：3.2.0 只用了 setTurnScreenOn(true) / FLAG_TURN_SCREEN_ON，但本机
+      // ColorOS 在一加 13 上，当 Activity 是由本 App 自己的前台服务用 startActivity 直接拉起
+      // （而不是 SystemUI 通过全屏 intent 拉起）时，会无视这个「亮屏」提示——于是 Activity 虽
+      // 已被创建并 onResume（日志可见），屏幕却一直是黑的，用户什么也看不到。
+      // SCREEN_BRIGHT_WAKE_LOCK | ACQUIRE_CAUSES_WAKEUP 是跨 OEM 真正能强制点亮屏幕的做法：
+      // 只要在本 Activity 创建时（屏幕还关着）获取它，就会立刻把显示点亮并保持常亮，直到用户
+      // 关闭闹钟（onDestroy 释放）。FLAG_KEEP_SCREEN_ON 已挂在 window 上，配合它保持亮屏。
+      wakeLock = pm.newWakeLock(
+        PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+        "AddinTimer:alarm_face",
+      ).apply { setReferenceCounted(false); acquire(20 * 60 * 1000L) }
+      AtkDiag.log(this, "执行界面: 已获取屏幕唤醒锁（亮屏+唤醒）")
     } catch (e: Exception) {
       wakeLock = null
     }
@@ -649,7 +665,12 @@ class AtkAlarmActivity : ComponentActivity() {
 
   override fun onResume() {
     super.onResume()
-    AtkDiag.log(this, "执行界面: onResume 已可见 id=${faceId.value}")
+    val interactive = try {
+      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) pm.isInteractive
+      else @Suppress("DEPRECATION") pm.isScreenOn
+    } catch (e: Exception) { false }
+    AtkDiag.log(this, "执行界面: onResume 已可见 id=${faceId.value} 亮屏=$interactive")
   }
 
   override fun onDestroy() {
