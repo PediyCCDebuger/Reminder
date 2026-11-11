@@ -754,17 +754,23 @@ fun AtkNewTaskDialog(onPick: (Int) -> Unit, onDismiss: () -> Unit) {
   }
 }
 
-/** A settings row: big title, blue current value, chevron. */
+/**
+ * A settings row: big title, blue current value, chevron.
+ *
+ * 3.1.0: the row used a hard 66.dp height, which clipped the second line of a longer value
+ * (「触发日志」的「最近 200 条：触发 / 前台服务 / 播铃 / 执行界面」被裁掉半行). Let the row
+ * grow with its content instead.
+ */
 @Composable
 fun AtkSettingRow(title: String, value: String, onClick: () -> Unit) {
   Column {
     Row(
       Modifier
         .fillMaxWidth()
-        .height(66.dp)
+        .heightIn(min = 66.dp)
         .background(AtkSkin.bgDeep)
         .clickable(onClick = onClick)
-        .padding(horizontal = 12.dp),
+        .padding(horizontal = 12.dp, vertical = 10.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
       Column(Modifier.weight(1f)) {

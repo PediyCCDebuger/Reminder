@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import cn.nnci.addintimer.Occurrence
@@ -52,6 +53,13 @@ class AtkEngine(private val context: Context) {
      */
     const val CHANNEL_ALARM_V3 = "addintimer_alarm_v3"
     /**
+     * 3.1.0: 3.0.0's v3 channel was created while the notification carried setOnlyAlertOnce.
+     * Once a channel has been created its importance is immutable, and some OEMs additionally
+     * cache the "alerting" behaviour of a channel, so a fresh id is the only reliable way to
+     * guarantee the new, un-suppressed notification is eligible for a full-screen intent.
+     */
+    const val CHANNEL_ALARM_V4 = "addintimer_alarm_v4"
+    /**
      * Status-bar channel. IMPORTANCE_LOW/MIN channels never draw a status-bar icon on Android 8+,
      * which is why the persistent icon and the 测试执行 icon were invisible. IMPORTANCE_DEFAULT
      * draws the icon; sound/vibration are muted below so it still behaves quietly.
@@ -60,7 +68,21 @@ class AtkEngine(private val context: Context) {
      */
     const val CHANNEL_STATUS = "addintimer_status"
     private const val NEXT_ID = 900001
+    /**
+     * 3.1.0: the alarm notification MUST have its own id. 3.0.0 reused item.id for the quiet
+     * 测试执行 notification, the persistent next-task notification AND the full-screen alarm
+     * notification. Updating an already-visible id is treated by SystemUI as a refresh, not a
+     * new alert, so the full-screen intent never fires. Smart Alarm likewise uses
+     * 10_000_000 + alarmId for the alarm notification and a different id for its status icon.
+     */
+    private const val ALARM_NOTIF_ID_BASE = 910000
+    private const val FACE_LAUNCH_GAP_MS = 8_000L
+    @Volatile
+    private var lastFaceLaunchAt = 0L
     private val FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm (E)")
+
+    /** Dedicated, never-reused notification id for a firing alarm. */
+    fun alarmNotificationId(id: Long): Int = ALARM_NOTIF_ID_BASE + id.toInt()
 
     fun toMillis(t: LocalDateTime): Long =
       t.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
@@ -102,6 +124,20 @@ class AtkEngine(private val context: Context) {
         setBypassDnd(true)
       }
       notifications.createNotificationChannel(alarmV3)
+      // 3.1.0: brand-new HIGH channel for the foreground service's full-screen notification.
+      // IMPORTANCE_HIGH is required for SystemUI to honour setFullScreenIntent; the channel is
+      // silent because the ringtone (with its 音量/渐响 settings) is produced by AtkAlarmSound.
+      val alarmV4 = NotificationChannel(
+        CHANNEL_ALARM_V4, "闹钟提醒（锁屏全屏）", NotificationManager.IMPORTANCE_HIGH,
+      ).apply {
+        description = "到点由前台服务发出，锁屏时点亮屏幕并弹出执行界面"
+        setSound(null, null)
+        enableVibration(false)
+        setShowBadge(true)
+        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        setBypassDnd(true)
+      }
+      notifications.createNotificationChannel(alarmV4)
       // Quiet but visible in the status bar: DEFAULT importance still renders the small icon,
       // while no sound / no vibration / no badge keeps it from disturbing the user.
       val status = NotificationChannel(
@@ -319,8 +355,20 @@ class AtkEngine(private val context: Context) {
    * Original 测试执行 behaviour: open the full 任务执行界面 immediately, no intermediate
    * toast. The high-priority notification is posted first so the status bar also gets the
    * "current alarm" icon next to the persistent "next task" icon.
+   *
+   * 3.1.0: the alarm chain (broadcast + foreground service) passes [dedupe] = true so the
+   * Activity -> service -> Activity cycle cannot keep re-launching the face. Manual 测试执行
+   * leaves it false, so a user-initiated test is never swallowed by a recent alarm.
    */
-  fun launchAlarmFace(id: Long, force: Boolean = false) {
+  fun launchAlarmFace(id: Long, force: Boolean = false, dedupe: Boolean = false) {
+    if (dedupe) {
+      val now = System.currentTimeMillis()
+      if (now - lastFaceLaunchAt < FACE_LAUNCH_GAP_MS) {
+        AtkDiag.log(context, "执行界面: 8 秒内已请求，跳过重复拉起 id=$id")
+        return
+      }
+      lastFaceLaunchAt = now
+    }
     val i = Intent(context, AtkAlarmActivity::class.java).apply {
       addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
       putExtra(EXTRA_ID, id)
@@ -393,9 +441,14 @@ class AtkEngine(private val context: Context) {
   }
 
   /**
-   * The real firing notification: HIGH importance + full-screen intent, which is the only
-   * officially supported way to bring a surface up over the lock screen. Also reused as the
-   * foreground-service notification so the sound keeps playing while the screen is locked.
+   * The real firing notification: HIGH importance + full-screen intent. In 3.1.0 this is
+   * mounted by the FOREGROUND SERVICE via startForeground() (SunriseAlarm's approach), NOT
+   * posted from the background broadcast. Android 12+ only honours a full-screen intent when
+   * the notification comes from an app that is actually in the foreground.
+   *
+   * 3.0.0's `setOnlyAlertOnce(true)` was the decisive bug: "only alert once" suppresses the
+   * heads-up / full-screen intent on any re-post, which is exactly what an alarm needs. It is
+   * removed here. Loop prevention is instead handled by [launchAlarmFace]'s dedupe flag.
    */
   fun buildAlarmNotification(item: AtkItem, force: Boolean = false): Notification {
     ensureChannel()
@@ -403,7 +456,7 @@ class AtkEngine(private val context: Context) {
     val snooze = actionIntent(ACTION_SNOOZE, item.id, (item.id * 7 + 4).toInt())
     val stop = actionIntent(ACTION_STOP, item.id, (item.id * 7 + 5).toInt())
     val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      Notification.Builder(context, CHANNEL_ALARM_V3)
+      Notification.Builder(context, CHANNEL_ALARM_V4)
     } else {
       @Suppress("DEPRECATION") Notification.Builder(context)
     }
@@ -417,10 +470,9 @@ class AtkEngine(private val context: Context) {
       .setVisibility(Notification.VISIBILITY_PUBLIC)
       .setAutoCancel(false)
       .setOngoing(true)
-      // The receiver posts this once; the foreground service re-posts the same id. Without this,
-      // every re-post would re-trigger the full-screen intent and loop Activity -> Service ->
-      // notify -> Activity forever.
-      .setOnlyAlertOnce(true)
+      // Smart Alarm sets this extra to force a heads-up on ROMs that gate full-screen intents
+      // behind one (it was visible in LaunchAlarm.launchalarm's bytecode). Harmless elsewhere.
+      .setExtras(Bundle().apply { putInt("headsup", 2) })
       .setContentIntent(full)
       .setFullScreenIntent(full, true)
       .addAction(R.drawable.ic_atk_stat, "贪睡 10 分钟", snooze)
@@ -428,15 +480,24 @@ class AtkEngine(private val context: Context) {
       .build()
   }
 
+  /** Remove any stale alarm notification so the next post is a genuinely NEW alert. */
+  fun cancelAlarmNotification(id: Long) {
+    try {
+      notifications.cancel(alarmNotificationId(id))
+    } catch (e: Exception) {
+    }
+  }
+
   /**
-   * Post the notification for [item].
-   * @param fullScreen true for a real firing (HIGH + full-screen intent). 测试执行 passes false:
-   *                   the caller opens 任务执行界面 itself, so this uses the quiet status-bar
-   *                   channel — DEFAULT importance so the alarm icon appears next to the
-   *                   persistent icon, but silent and without a heads-up card.
+   * Last-resort post of the full-screen notification, used ONLY when the foreground service
+   * could not be started. The normal path is AtkAlarmService.startForeground().
+   * 测试执行 passes false and gets the quiet status-bar notification on a *different* id, so
+   * it can never turn the real alarm notification into a suppressed "update".
    */
   fun showNotification(item: AtkItem, fullScreen: Boolean = true, force: Boolean = false) {
-    val n = if (fullScreen) {
+    val alarm = fullScreen
+    val notificationId = if (alarm) alarmNotificationId(item.id) else item.id.toInt()
+    val n = if (alarm) {
       buildAlarmNotification(item, force)
     } else {
       ensureChannel()
@@ -463,9 +524,11 @@ class AtkEngine(private val context: Context) {
         .build()
     }
     try {
-      notifications.notify(item.id.toInt(), n)
+      if (alarm) notifications.cancel(notificationId)
+      notifications.notify(notificationId, n)
+      AtkDiag.log(context, "全屏通知: 兜底 notify 已发出 id=${item.id} notif=$notificationId")
     } catch (e: SecurityException) {
-      // POST_NOTIFICATIONS not granted; the full-screen activity still tries to show.
+      AtkDiag.log(context, "全屏通知: 兜底 notify 被拒 ${e.message}")
     }
   }
 
@@ -545,7 +608,11 @@ class AtkEngine(private val context: Context) {
     try { notifications.notify(NEXT_ID, n) } catch (e: SecurityException) { }
   }
 
-  fun dismiss(id: Long) = notifications.cancel(id.toInt())
+  /** Cancel both the 3.1.0 foreground-service alarm notification and the legacy quiet one. */
+  fun dismiss(id: Long) {
+    try { notifications.cancel(id.toInt()) } catch (e: Exception) { }
+    cancelAlarmNotification(id)
+  }
 
   /** Whether Android still lets this app launch a full-screen Activity over the keyguard. */
   fun canUseFullScreenIntent(): Boolean =

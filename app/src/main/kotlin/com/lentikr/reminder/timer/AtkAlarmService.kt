@@ -11,13 +11,16 @@ import android.os.PowerManager
 /**
  * Keeps a firing alarm alive while the screen is locked.
  *
- * 3.0.0: the exact alarm's PendingIntent is a **broadcast** (see [AtkEngine.fireIntent]).
- * [AtkReceiver] posts the full-screen notification itself and then starts this service purely
- * to keep the process and the ringtone alive while the screen is locked. Starting a foreground
- * service from the background can be refused on Android 12+, so the tone and the notification
- * are already up before this service is asked to start — it is a fallback, not a gate.
- * This service must never re-post the full-screen notification: doing so would re-trigger
- * SystemUI's full-screen launch and loop Activity -> Service -> notify -> Activity.
+ * 3.1.0: the exact alarm's PendingIntent is a **broadcast** (see [AtkEngine.fireIntent]).
+ * [AtkReceiver] only takes a wake lock, starts the tone and starts this service. THIS SERVICE
+ * is the component that mounts the HIGH-importance full-screen notification, via
+ * startForeground(), from a genuinely foreground process — the architecture used by
+ * SunriseAlarm (verified working on this device) and by Smart Alarm's LaunchAlarm service.
+ * Posting the notification from the background broadcast (3.0.0) was silently downgraded by
+ * Android 12+/ColorOS, so the 执行界面 never came up over the keyguard.
+ *
+ * Once foreground, this service also raises the 执行界面 directly as a fallback; the dedupe
+ * flag on [AtkEngine.launchAlarmFace] prevents an Activity -> Service -> Activity loop.
  *
  * Failure modes are made visible instead of silent: every startForeground attempt, the sound
  * start, the activity launch and the re-arm are written to [AtkDiag] so 权限自检 → 诊断日志 can
@@ -38,6 +41,8 @@ class AtkAlarmService : Service() {
   private var wakeLock: PowerManager.WakeLock? = null
   private var currentId = -1L
   private var foreground = false
+  /** Avoid re-cancelling (and re-alerting) the same alarm when onCreate starts us again. */
+  private var mountedId = -1L
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -91,18 +96,34 @@ class AtkAlarmService : Service() {
     // either component being torn down.
     AtkAlarmSound.play(this, item)
 
-    val foregrounded = enterForeground(engine, item, id.toInt(), force)
-    if (!foregrounded) {
-      // Could not enter the foreground as a mediaPlayback service (rare). The tone is already
-      // playing from the activity and a plain notification is posted below, so the alarm still
-      // works — we just skip the "foreground" guarantees.
-      AtkDiag.log(this, "svc: 无法进入前台，改为普通通知 + 本进程播铃")
+    // 3.1.0 DECISIVE STEP: mount the full-screen notification as THIS foreground service's
+    // notification, exactly like SunriseAlarm's
+    //   startForeground(NOTIF_ID, notification, FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+    // which is verified to wake this device from the lock screen. 3.0.0 posted it from the
+    // background broadcast instead, where Android 12+ treats it as a silent refresh.
+    // Cancel first so SystemUI sees a genuinely NEW alert (an update never fires the
+    // full-screen intent), and never reuse the 测试执行 / persistent-icon notification id.
+    val notifId = AtkEngine.alarmNotificationId(id)
+    if (mountedId != id) {
+      engine.cancelAlarmNotification(id)
+      mountedId = id
     }
+    val foregrounded = enterForeground(engine, item, notifId, force)
+    AtkDiag.log(
+      this,
+      "全屏通知: startForeground 已挂载 id=$id notif=$notifId 前台=$foregrounded " +
+        "全屏权限=${engine.canUseFullScreenIntent()}",
+    )
+    if (!foregrounded) {
+      // No foreground service at all: a plain notify() is the last remaining net.
+      AtkDiag.log(this, "svc: 无法进入前台，改为兜底 notify + 本进程播铃")
+      engine.showNotification(item, fullScreen = true, force = force)
+    }
+    // Now that the process is genuinely in the foreground, a direct launch is allowed again
+    // (Android 10+ blocks it from a background broadcast). dedupe stops the
+    // Activity -> service -> Activity loop.
+    engine.launchAlarmFace(id, force, dedupe = true)
 
-    // The receiver already posted the full-screen notification; re-posting it here could
-    // re-trigger SystemUI's full-screen launch and loop forever. startForeground (above) keeps
-    // the same notification id alive without a second notify().
-    // The surface is raised by SystemUI, so this service NEVER calls startActivity itself.
     runCatching { AtkStore(this).log(id, 1, item.name) }
     runCatching { engine.schedule(item) }
     runCatching { engine.refreshNext() }
@@ -223,6 +244,7 @@ class AtkAlarmService : Service() {
       runCatching { AtkEngine(this).dismiss(currentId) }
       currentId = -1L
     }
+    mountedId = -1L
     stopSelf(startId)
   }
 

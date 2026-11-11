@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -29,6 +30,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -386,9 +388,13 @@ fun TimerApp() {
             0 -> {
               // Original behaviour: 测试执行 opens the 任务执行界面 directly. The status bar
               // gets the current-task alarm icon plus the persistent next-task icon.
+              // 3.1.0: force=true is essential — without it AtkAlarmActivity and
+              // AtkAlarmService both bail out on a disabled task ("任务已停用，不响"), which is
+              // why 测试执行 did nothing until the task was activated. A test is a user action,
+              // so it must run regardless of the task's enabled flag.
               store.log(item.id, 0, "测试执行")
               engine.showNotification(item, fullScreen = false)
-              engine.launchAlarmFace(item.id)
+              engine.launchAlarmFace(item.id, force = true)
             }
             1 -> deleteTarget = item
             2 -> {
@@ -1106,10 +1112,27 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
   }
   if (showLog) {
     Dialog(onDismissRequest = { showLog = false }) {
-      Column(Modifier.fillMaxWidth().background(AtkSkin.lightPanel)) {
+      // 3.1.0: a hard 420.dp list pushed the bottom 清空/刷新/关闭 row and the newest log
+      // lines off the screen on this device. Cap the whole dialog, keep the list bounded,
+      // respect the navigation bar and start scrolled to the newest entries.
+      Column(
+        Modifier
+          .fillMaxWidth()
+          .heightIn(max = 480.dp)
+          .background(AtkSkin.lightPanel)
+          .navigationBarsPadding(),
+      ) {
         AtkDialogTitle("触发日志")
-        LazyColumn(Modifier.fillMaxWidth().height(420.dp)) {
-          items(logText.split("\n")) { line ->
+        val lines = logText.split("\n")
+        val listState = rememberLazyListState()
+        LaunchedEffect(logText) {
+          if (lines.isNotEmpty()) listState.scrollToItem(lines.lastIndex)
+        }
+        LazyColumn(
+          state = listState,
+          modifier = Modifier.fillMaxWidth().heightIn(min = 160.dp, max = 360.dp),
+        ) {
+          items(lines) { line ->
             Text(
               line,
               color = Color(0xFF202020),

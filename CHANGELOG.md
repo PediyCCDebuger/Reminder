@@ -2,6 +2,36 @@
 
 每个 Release 的说明都取自本文件对应版本的小节，由打包工作流自动写入 GitHub Release。
 
+## [3.1.0] - 2026-11-11
+
+### 修复（真机日志定位：锁屏 / 退出 APP 仍不执行，3.0.0 未解决）
+
+**根因**：3.0.0 把带 `setFullScreenIntent` 的闹钟通知放在**后台广播**里用 `NotificationManager.notify()` 发出，而且
+
+1. 通知带了 `setOnlyAlertOnce(true)` —— 这个标志会抑制该通知的 heads-up 与全屏 intent；闹钟恰恰每次都需要「提醒」；
+2. 通知 id 直接复用 `item.id`，与「测试执行」的静音通知、常驻状态栏通知共用。那条通知是 `ongoing` 且不自动消失，于是真实触发变成对一条**已存在通知的更新**，SystemUI 不会把它当成新提醒，自然不会拉起全屏界面；
+3. 通知由后台进程发出，进程当时还没有前台服务。Android 12+ 只在前台上下文中认可 full-screen intent 的唤醒能力；广播里紧接着的 `startActivity` 又被后台启动 Activity 限制静默丢弃。
+
+真机日志完整印证：`触发 id=23` → `全屏通知: 已从广播发出` → `音: MediaPlayer 起播` → `前台服务: 启动请求已发出` → `执行界面: 已请求直接启动`，全部都有，但屏幕始终没亮，直到解锁点通知才出现 `执行界面: 打开`。
+
+**修复**（对齐两个在本机验证可用的参考实现）：
+
+- **SunriseAlarm**（开源，锁屏准确执行）：`AlarmReceiver` 只 `startForegroundService`，`AlarmRingService` 把带 `setFullScreenIntent` 的通知**直接作为 `startForeground(NOTIF_ID, notification, specialUse)` 的参数**，从不单独 `notify()`；`MainActivity` 声明 `showWhenLocked/turnScreenOn`。本项目改为：广播只负责取 `PARTIAL_WAKE_LOCK`、播铃、启动前台服务；**由前台服务挂载全屏通知**，并在进程进入前台后再尝试直接拉界面兜底。
+- **Smart Alarm 2.7.7**（androguard 逆向 `LaunchAlarm.launchalarm`）：通知在 `LaunchAlarm` 服务内发出，用 `10_000_000 + alarmId` 的**独立通知 id**，带 `headsup` extra，且没有 `setOnlyAlertOnce`。本项目改为：闹钟通知使用独立的 `910000 + id`，发布前先 `cancel()` 保证是全新提醒，去掉 `setOnlyAlertOnce`，补上 `headsup` extra，并启用全新的 `IMPORTANCE_HIGH` 渠道 `addintimer_alarm_v4`（渠道重要性创建后不可变）。
+- 去掉 3.0.0 用 `setOnlyAlertOnce` 防循环的做法，改为 `launchAlarmFace(dedupe)` 在 8 秒内去重，避免「广播 → 服务 → 界面 → 再起服务 → 再拉界面」的死循环，同时不影响用户手动点「测试执行」。
+- 诊断日志新增 `全屏通知: startForeground 已挂载 … 全屏权限=…`，下次可直接看出通知到底由谁、在什么前台状态下发出。
+
+### 修复
+
+- **未激活的任务点「测试执行」没反应**：日志 `执行界面: 任务已停用，不响 id=23 (base[10]=0)` 说明执行界面与前台服务都对停用任务直接退出。现在「测试执行」贯通 `EXTRA_FORCE=true`，无论任务是否激活都能立即测试；「60 秒后真实触发」同样复核过 force 全链路。
+- **「触发日志」选项下半部分被裁掉**：设置行写死 66dp 高度，长副标题第二行显示不全；改为按内容自适应高度。触发日志弹窗原本固定 420dp，底部按钮与最新日志容易被挤出屏幕；改为整体限高 + 列表限高 + 避开系统导航栏，并在打开时**自动滚动到最新一条**。
+
+### 注意
+
+- 3.1.0 沿用 3.0.0/2.9.0 的签名密钥，可直接覆盖安装。
+- 锁屏可用性仍依赖系统权限：请在「系统设置 → 服务状态 → 权限自检」确认「全屏通知」「精确闹钟」「通知权限」「忽略电池优化」均开启；ColorOS 还需允许自启动、后台运行、锁屏显示、电池策略不限制。
+- 若仍不到点，请先看「触发日志」：现在是「全屏通知: startForeground 已挂载 … 全屏权限=true」而不是旧版的「已从广播发出」，可据此区分是通知没发出来还是 ROM 拦了全屏界面。
+
 ## [3.0.0] - 2026-11-11
 
 ### 修复（真机反馈）

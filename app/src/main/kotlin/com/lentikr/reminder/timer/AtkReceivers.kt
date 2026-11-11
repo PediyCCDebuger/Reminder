@@ -85,6 +85,9 @@ object AtkAlarmSound {
   private var rampTask: Runnable? = null
   private var currentId = -1L
   private var active = false
+  // Smart Alarm acquires a PARTIAL_WAKE_LOCK at the very top of AlarmReceiver.onReceive().
+  // This singleton keeps it alive after the receiver returns, until the alarm is dismissed.
+  private var cpuLock: PowerManager.WakeLock? = null
   // An active media session legitimates the mediaPlayback foreground service: without it,
   // Android 14+ kills the service ~1s after startForeground because the mediaPlayback type
   // is "misused" (no session). That kill took the ringtone down with it, which is exactly the
@@ -92,6 +95,30 @@ object AtkAlarmSound {
   private var mediaSession: MediaSession? = null
 
   fun isPlaying(): Boolean = active
+
+  /** Hold the CPU awake from the alarm broadcast until the user dismisses the alarm. */
+  fun holdCpu(context: Context) {
+    try {
+      if (cpuLock?.isHeld == true) return
+      val pm = context.applicationContext
+        .getSystemService(Context.POWER_SERVICE) as PowerManager
+      cpuLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AddinTimer:fire").apply {
+        setReferenceCounted(false)
+        acquire(20 * 60 * 1000L)
+      }
+      AtkDiag.log(context, "触发: 已获取 CPU 唤醒锁")
+    } catch (e: Exception) {
+      AtkDiag.log(context, "触发: CPU 唤醒锁失败 ${e.message}")
+    }
+  }
+
+  private fun releaseCpu() {
+    try {
+      if (cpuLock?.isHeld == true) cpuLock?.release()
+    } catch (e: Exception) {
+    }
+    cpuLock = null
+  }
 
   /**
    * Play the tone configured on [item] (act[6] 铃声类型 + act[7] 选择路径). Passing null keeps
@@ -298,6 +325,7 @@ object AtkAlarmSound {
     ringtone = null
     try { vibrator?.cancel() } catch (e: Exception) { }
     vibrator = null
+    releaseCpu()
     active = false
     currentId = -1L
   }
@@ -326,21 +354,28 @@ class AtkReceiver : BroadcastReceiver() {
           "触发 id=$id 任务=${item?.name ?: "查不到"} 启用=${item?.enabled} force=$force",
         )
         if (item != null && (item.enabled || force)) {
-          // 1) Post the HIGH-importance notification carrying setFullScreenIntent(Activity).
-          //    This is the single decisive step: SystemUI itself launches the full-screen
-          //    Activity over the keyguard. Both SunriseAlarm and Smart Alarm rely on exactly
-          //    this, and it works on OnePlus/ColorOS where a plain background startActivity
-          //    is blocked. It must happen HERE, in the broadcast, never from the Activity.
+          // 3.1.0 ROOT-CAUSE FIX. 3.0.0 posted the full-screen notification from THIS
+          // background broadcast, on an id reused by 测试执行, with setOnlyAlertOnce(true).
+          // Android 12+ only honours setFullScreenIntent for a genuinely NEW alerting
+          // notification coming from an app in the foreground; a background re-post is treated
+          // as a silent refresh, so SystemUI never launched the 执行界面. The log proved it:
+          // "触发 / 全屏通知: 已从广播发出 / 执行界面: 已请求直接启动" all appeared, yet the
+          // screen stayed dark until the user unlocked and tapped the notification.
+          //
+          // SunriseAlarm (verified working on this device) mounts the full-screen notification
+          // as the FOREGROUND SERVICE's startForeground() notification; Smart Alarm posts it
+          // from inside its LaunchAlarm service. So the notification now belongs to the
+          // service, never to this broadcast.
+          AtkAlarmSound.holdCpu(context)
           engine.ensureChannel()
-          engine.showNotification(item, fullScreen = true, force = force)
-          AtkDiag.log(context, "全屏通知: 已从广播发出 id=$id")
-          // 2) Tone straight from the receiver, so a killed process still starts audible.
+          // 1) Tone first: a killed/slow service must not leave the alarm silent.
           AtkAlarmSound.play(context, item)
-          // 3) A foreground service keeps the process (and the tone) alive while locked.
+          // 2) Start the FGS; IT mounts the full-screen notification via startForeground()
+          //    and, once the process is foreground, raises the 执行界面 as a fallback.
+          //    A direct startActivity here from the background is silently dropped on
+          //    Android 10+ and would only consume the dedupe window.
           startAlarmService(context, engine, id, force)
-          // 4) Smart Alarm's extra net: try to raise the surface directly too. Blocked on
-          //    most ROMs, harmless when it is; the notification already handles it.
-          engine.launchAlarmFace(id, force)
+          AtkDiag.log(context, "全屏通知: 已交给前台服务挂载 id=$id")
           store.log(id, 1, item.name)
           engine.schedule(item)
           engine.refreshNext()
@@ -351,11 +386,11 @@ class AtkReceiver : BroadcastReceiver() {
         val item = if (id >= 0) store.get(id) else null
         AtkDiag.log(context, "贪睡到点 id=$id 任务=${item?.name}")
         if (item != null && item.enabled) {
+          AtkAlarmSound.holdCpu(context)
           engine.ensureChannel()
-          engine.showNotification(item, fullScreen = true)
           AtkAlarmSound.play(context, item)
           startAlarmService(context, engine, id, false)
-          engine.launchAlarmFace(id)
+          AtkDiag.log(context, "全屏通知: 已交给前台服务挂载（贪睡）id=$id")
           store.log(id, 2, item.name + " 贪睡")
         }
       }
@@ -392,10 +427,10 @@ class AtkReceiver : BroadcastReceiver() {
   }
 
   /**
-   * A real firing runs through [AtkAlarmService]: a foreground service survives the broadcast and
-   * keeps ringing while the screen is locked. Android 12+ can refuse a background FGS start, so
-   * the tone is already playing (see ACTION_FIRE) and the full-screen notification still opens
-   * the 执行界面 if the service is rejected.
+   * A real firing runs through [AtkAlarmService]: this is where the full-screen notification is
+   * mounted (startForeground), because Android 12+ ignores a full-screen intent posted by a
+   * background app. If the FGS start itself is refused, the broadcast falls back to a direct
+   * notify() + startActivity as a last resort.
    */
   private fun startAlarmService(context: Context, engine: AtkEngine, id: Long, force: Boolean) {
     val svc = Intent(context, AtkAlarmService::class.java).apply {
@@ -411,13 +446,13 @@ class AtkReceiver : BroadcastReceiver() {
       }
       AtkDiag.log(context, "前台服务: 启动请求已发出")
     } catch (e: Exception) {
-      // Android 12+ / ColorOS may refuse a background FGS start. The full-screen notification
-      // was already posted and the tone is already playing, so the alarm is NOT lost here.
+      // Android 12+ / ColorOS may refuse a background FGS start. Without a service we have no
+      // foreground context, so post the notification directly as the only remaining net.
       AtkDiag.log(context, "前台服务: 启动被拒 ${e.javaClass.simpleName}: ${e.message}")
       val item = runCatching { AtkStore(context).get(id) }.getOrNull() ?: return
       AtkAlarmSound.play(context, item)
       engine.showNotification(item, fullScreen = true, force = force)
-      engine.launchAlarmFace(id, force)
+      engine.launchAlarmFace(id, force, dedupe = true)
     }
   }
 
