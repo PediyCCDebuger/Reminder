@@ -83,9 +83,9 @@ class AtkAlarmService : Service() {
       if (force) {
         // 60 秒后真实触发 explicitly forces the ring chain even on a disabled task, so the user
         // can verify 响铃 / 渐响 / 执行界面 without first enabling it.
-        AtkDiag.log(this, "svc: 任务已停用，但 60 秒测试强制触发 id=$id（base[10]=${item.base.getOrNull(10) ?: "?"]}）")
+        AtkDiag.log(this, "svc: 任务已停用，但 60 秒测试强制触发 id=$id（base[10]=${item.base.getOrNull(10) ?: "?"}）")
       } else {
-        AtkDiag.log(this, "svc: 任务已停用 id=$id（base[10]=${item.base.getOrNull(10) ?: "?"]}）")
+        AtkDiag.log(this, "svc: 任务已停用 id=$id（base[10]=${item.base.getOrNull(10) ?: "?"}）")
         stopEverything(startId)
         return START_NOT_STICKY
       }
