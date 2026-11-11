@@ -658,7 +658,55 @@ class AtkEngine(private val context: Context) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
       out.add("悬浮窗（后台弹出界面）" to Settings.canDrawOverlays(context))
     }
+    out.add("保活模式（后台常驻）" to isKeepAliveOn())
     return out
+  }
+
+  // ---- 3.6.2 常驻前台服务保活控制 ----
+  // 根因：应用进程在锁屏休眠期间被 ColorOS 速冻，setAlarmClock 回调被积压到应用解冻（用户点击
+  // 通知栏）才投递，表现为「不点击通知栏就永远不执行」。常驻一个前台服务使进程保持存活。
+  fun isKeepAliveOn(): Boolean {
+    val prefs = context.getSharedPreferences("atk_settings", Context.MODE_PRIVATE)
+    return prefs.getBoolean("keep_alive", true) // 默认开启
+  }
+
+  fun setKeepAlive(on: Boolean) {
+    context.getSharedPreferences("atk_settings", Context.MODE_PRIVATE)
+      .edit().putBoolean("keep_alive", on).apply()
+    if (on) startKeepAlive() else stopKeepAlive()
+  }
+
+  fun startKeepAlive() {
+    try {
+      val app = context.applicationContext
+      app.startForegroundService(Intent(app, AtkKeepAliveService::class.java))
+      AtkDiag.log(context, "保活: 已请求启动前台服务")
+    } catch (e: Exception) {
+      AtkDiag.log(context, "保活: 启动前台服务失败 ${e.javaClass.simpleName}: ${e.message}")
+    }
+  }
+
+  fun stopKeepAlive() {
+    try {
+      val app = context.applicationContext
+      app.stopService(Intent(app, AtkKeepAliveService::class.java))
+      AtkDiag.log(context, "保活: 已停止前台服务")
+    } catch (e: Exception) {
+    }
+  }
+
+  /**
+   * ColorOS / 一加「自启动 / 后台运行」没有标准 Intent，且这是 setAlarmClock 被延迟的头号原因。
+   * 优先尝试厂商自启动设置页，失败回退到应用详情页（用户可在其中找到自启动 / 后台运行 / 电池）。
+   */
+  fun openAutoStartSettings() {
+    try {
+      val oppo = Intent("com.coloros.safecenter.action.START_OPPO_SAFE_CENTER")
+      oppo.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      context.startActivity(oppo)
+    } catch (e: Exception) {
+      openAppDetails()
+    }
   }
 
   fun openExactAlarmSettings() {

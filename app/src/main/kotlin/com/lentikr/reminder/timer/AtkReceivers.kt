@@ -349,6 +349,8 @@ class AtkReceiver : BroadcastReceiver() {
       Intent.ACTION_MY_PACKAGE_REPLACED -> {
         engine.ensureChannel()
         engine.rescheduleAll()
+        // 3.6.2 保活：开机 / 覆盖安装后重启常驻前台服务（受开关控制）。
+        if (engine.isKeepAliveOn()) engine.startKeepAlive()
       }
 
       AtkEngine.ACTION_FIRE -> {
