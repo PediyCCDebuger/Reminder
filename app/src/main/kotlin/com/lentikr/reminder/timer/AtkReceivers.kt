@@ -151,7 +151,7 @@ object AtkAlarmSound {
     // 渐响模式 (act[10]): 0 = 立即; n = 渐响 n*10 秒.
     val rampMode = item?.let { AtkItem.intOf(it.actValue(10)) } ?: 0
     val rampSeconds = (rampMode * 10).coerceIn(0, 90)
-    val startVol = if (rampSeconds > 0) (maxVol * 0.12f).coerceAtLeast(0.02f) else maxVol
+    val startVol = if (rampSeconds > 0) (maxVol * 0.05f).coerceAtLeast(0.02f) else maxVol
 
     if (uri == null) {
       AtkDiag.log(app, "音: act[7]=「无」，只振动")
@@ -349,8 +349,6 @@ class AtkReceiver : BroadcastReceiver() {
       Intent.ACTION_MY_PACKAGE_REPLACED -> {
         engine.ensureChannel()
         engine.rescheduleAll()
-        // 3.6.2 保活：开机 / 覆盖安装后重启常驻前台服务（受开关控制）。
-        if (engine.isKeepAliveOn()) engine.startKeepAlive()
       }
 
       AtkEngine.ACTION_FIRE -> {

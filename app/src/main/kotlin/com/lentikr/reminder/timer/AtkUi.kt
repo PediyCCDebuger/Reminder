@@ -78,12 +78,6 @@ fun TimerApp() {
     val engine = remember { AtkEngine(context) }
     val prefs = remember { context.getSharedPreferences("atk_settings", Context.MODE_PRIVATE) }
 
-    // 3.6.2 保活：App 处于前台时启动常驻前台服务（最可靠的启动时机，不受 Android 12+ 后台限制）。
-    // 进程存活后，锁屏休眠期间 setAlarmClock 到点即可准时唤醒执行，不再依赖用户点击通知栏。
-    LaunchedEffect(Unit) {
-      if (engine.isKeepAliveOn()) engine.startKeepAlive()
-    }
-
     var screen by remember { mutableStateOf(Screen.LIST) }
     var tab by remember { mutableIntStateOf(0) }
     var editingId by remember { mutableStateOf(-1L) }
@@ -830,7 +824,6 @@ private val GENERAL_SETTINGS = listOf(
   SettingDef("icon_click", "点击定时器图标", listOf("操作菜单", "编辑定时器", "执行任务"), "操作菜单"),
   SettingDef("sort", "任务排序方式", listOf("按执行时间", "按创建时间", "按名称"), "按执行时间"),
   SettingDef("log_keep", "执行日志保存期限", listOf("一个月", "三个月", "半年", "一年", "永久"), "一个月"),
-  SettingDef("keep_alive", "保活模式（后台常驻）", listOf("开启", "关闭"), "开启"),
 )
 private val TIMER_SETTINGS = listOf(
   SettingDef("power", "任务执行时电源模式", listOf("半唤醒(节电模式)", "全唤醒"), "半唤醒(节电模式)"),
@@ -869,7 +862,6 @@ private fun SettingsScreen(
           AtkSettingRow(def.title, valueOf(def)) {
             choice = SettingChoice(def, valueOf(def)) { v ->
               prefs.edit().putString(def.key, v).apply()
-              if (def.key == "keep_alive") engine.setKeepAlive(v == "开启")
               version++
             }
           }
@@ -1126,12 +1118,17 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
           title = name,
           value = if (ok) "已开启" else "未开启（点击前往系统设置）",
           onClick = {
-            when {
-              name.contains("精确闹钟") -> engine.openExactAlarmSettings()
-              name.contains("通知") && !name.contains("全屏") -> engine.openNotificationSettings()
-              name.contains("电池") -> engine.openBatterySettings()
-              name.contains("全屏") -> engine.openFullScreenSettings()
-              name.contains("悬浮窗") -> engine.openOverlaySettings()
+            if (ok) {
+              toast(context, "已开启：$name")
+            } else {
+              toast(context, "正在打开系统设置…")
+              when {
+                name.contains("精确闹钟") -> engine.openExactAlarmSettings()
+                name.contains("通知") && !name.contains("全屏") -> engine.openNotificationSettings()
+                name.contains("电池") -> engine.openBatterySettings()
+                name.contains("全屏") -> engine.openFullScreenSettings()
+                name.contains("悬浮窗") -> engine.openOverlaySettings()
+              }
             }
           },
         )
@@ -1153,11 +1150,10 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
       item {
         Text(
           "锁屏闹钟必须开启「全屏通知」，否则到点只在通知栏提示。一加 13 / ColorOS 还必须：允许自启动、" +
-            "允许后台运行、允许锁屏显示、电池策略设为不限制，并保持本应用的「保活模式（后台常驻）」为已开启。" +
-            "任何一项缺失都会导致应用被冻结——典型表现就是「不点击通知栏就永远不执行」（到点无亮屏无声音，" +
-            "直到你解锁并点通知栏才响）。请先点上方「自启动 / 后台运行」与「忽略电池优化」前往系统设置开启，" +
-            "并确认「保活模式」为已开启。到点不响时请先看「触发日志」：没有记录说明闹钟没被系统唤醒（被冻结），" +
-            "有记录但没有「起播」说明铃声/音频被拦。",
+            "允许后台运行、允许锁屏显示、电池策略设为「不限制」（或完全允许后台行为）。任何一项缺失都会导致" +
+            "应用被冻结——典型表现就是「不点击通知栏就永远不执行」（到点无亮屏无声音，直到你解锁并点通知栏才响）。" +
+            "请点上方「自启动 / 后台运行」与「忽略电池优化」前往系统设置开启。到点不响时请先看「触发日志」：" +
+            "没有记录说明闹钟没被系统唤醒（被冻结），有记录但没有「起播」说明铃声/音频被拦。",
           color = AtkSkin.sectionText,
           fontSize = 13.sp,
           modifier = Modifier.padding(12.dp),
