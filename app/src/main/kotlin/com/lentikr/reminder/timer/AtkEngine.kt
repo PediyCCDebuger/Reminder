@@ -291,34 +291,46 @@ class AtkEngine(private val context: Context) {
       alarms.cancel(pi)
       return
     }
-    // 3.5.0 根因修复：对齐 SunriseAlarm（本机验证可用）——改用 setExactAndAllowWhileIdle，不再用
-    // setAlarmClock。根因见 [fireTestSoon]：setAlarmClock 在本机 ColorOS / 一加 13 上让系统接管闹钟
-    // 界面、压制 App 自己的 full-screen intent，FSI 因此被吞（3.4.0 日志「2.5s 内 FSI 未拉起」），
-    // 界面只能靠看门狗的后台 startActivity 兜底，而那种启动方式在 ColorOS 上点不亮屏幕。
-    // setAlarmClock 的「系统时钟显示下次闹钟」指示因此不再提供，但换取稳定亮屏。
+    // 3.6.1：排程统一走 [setExactAlarm]，其主路径是 setAlarmClock（对齐 Smart Alarm-v2.7.7，
+    // 本机 ColorOS / 一加 13 验证可用）。setAlarmClock 保证锁屏深睡时也准时唤醒设备、不受 Doze
+    // 延后；并且恢复「系统时钟显示下次闹钟」指示。3.5.0/3.6.0 一度改用 setExactAndAllowWhileIdle
+    // 以规避当时 FSI 被吞的问题，但实测该类型在深睡下被延后投递（60 秒测试晚了约 91 秒且须解锁才送达），
+    // 故 3.6.1 改回 setAlarmClock。界面已由 3.6.0 的前台服务直接 startActivity 承担，不再依赖 FSI，
+    // 故 setAlarmClock + 直接 startActivity 正好等价于 Smart Alarm 的可用组合。
     // 3.6.0：排程日志不再打印任务名（隐私），改为在 rescheduleAll 处汇总一行。
     setExactAlarm(ms, pi, item.id)
   }
 
   /**
-   * 3.5.0：与 SunriseAlarm 一致的精确闹钟阶梯。setExactAndAllowWhileIdle 是 doze 豁免、到点触发
-   * 的精确闹钟；精确闹钟权限缺失时降级到 setAndAllowWhileIdle，再不行用普通 set。返回是否成功排程。
-   * 3.6.0：排程日志不再打印任务名（隐私保护）；正常设定静默，仅在降级/失败时记录，且不带任务名。
+   * 3.6.1：主路径改用 [AlarmManager.setAlarmClock]，对齐 Smart Alarm-v2.7.7 在本机（一加13 /
+   * ColorOS / Android14）验证可用的排程方式。
+   *
+   * 根因：3.6.0 用 setExactAndAllowWhileIdle，该类型在设备锁屏深睡 / Doze 下会被系统**延后投递**
+   * （实测 60 秒测试实际在约 91 秒后才触发，且必须等用户解锁唤醒设备才送达），所以「到点不响、
+   * 不亮屏」——并非界面链路问题，而是闹钟根本没按时投递。setAlarmClock 是 Android 唯一保证
+   * 从深睡唤醒设备、不受 Doze 延后的用户闹钟类型，也不需要 SCHEDULE_EXACT_ALARM 权限。
+   *
+   * 为何此前不敢用 setAlarmClock：3.0.0–3.5.0 用它在 FSI（full-screen intent）路径下被系统压制
+   * FSI、导致锁屏界面出不来。但 3.6.0 起界面已由「前台服务直接 startActivity」承担、不再依赖
+   * FSI，所以 setAlarmClock + 直接 startActivity 正好等价于 Smart Alarm 的可用路径。
+   *
+   * 排程日志不再打印任务名（隐私）；正常设定静默返回 true，仅在降级/失败时记录且不带任务名。
    */
   private fun setExactAlarm(ms: Long, pi: PendingIntent, id: Long): Boolean {
     val tag = "#$id"
+    val aci = AlarmManager.AlarmClockInfo(ms, pi)
     return try {
-      alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, ms, pi)
+      alarms.setAlarmClock(aci, pi)
       true
     } catch (e: SecurityException) {
-      AtkDiag.log(context, "排程: setExactAndAllowWhileIdle 被拒（${e.message}），降级 setAndAllowWhileIdle")
+      AtkDiag.log(context, "排程: setAlarmClock 被拒（${e.message}），降级 setExactAndAllowWhileIdle")
       try {
-        alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, ms, pi)
+        alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, ms, pi)
         true
       } catch (e2: SecurityException) {
-        AtkDiag.log(context, "排程: setAndAllowWhileIdle 也被拒（${e2.message}），降级 set")
+        AtkDiag.log(context, "排程: 降级 setAndAllowWhileIdle（${e2.message}）")
         try {
-          alarms.set(AlarmManager.RTC_WAKEUP, ms, pi)
+          alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, ms, pi)
           true
         } catch (e3: SecurityException) {
           AtkDiag.log(context, "排程: 全部失败，任务 $tag 无法定时")
@@ -342,16 +354,15 @@ class AtkEngine(private val context: Context) {
    * time. This uses a separate request code so the task's normal schedule is left untouched.
    */
   fun fireTestSoon(id: Long) {
-    // Exercise the *exact same* chain as a real alarm: setExactAndAllowWhileIdle -> AtkReceiver
-    // -> full-screen notification + foreground service. A separate request code leaves the task's
-    // normal schedule untouched; EXTRA_FORCE makes the chain fire even on a disabled task.
-    // 3.5.0：与真实排程一致用 setExactAndAllowWhileIdle（不再用 setAlarmClock）。setAlarmClock 在
-    // 本机 ColorOS 上会压制 App 的 full-screen intent，导致 FSI 被吞、锁屏不亮屏——这是 3.4.0 之前
-    // 一直「到点不亮屏」的根因，必须对齐 SunriseAlarm 的 setExactAndAllowWhileIdle。
+    // Exercise the *exact same* chain as a real alarm: setAlarmClock -> AtkReceiver
+    // -> foreground service -> 直接 startActivity 执行界面. A separate request code leaves the
+    // task's normal schedule untouched; EXTRA_FORCE makes the chain fire even on a disabled task.
+    // 3.6.1：与真实排程一致用 setAlarmClock（对齐 Smart Alarm）。setAlarmClock 保证锁屏深睡时
+    // 也能准时唤醒设备，不受 Doze 延后——这是 3.6.0 用 setExactAndAllowWhileIdle 导致「到点不响、
+    // 不亮屏」的根因。此前担心 setAlarmClock 压制 FSI 是错的：3.6.0 起界面已不依赖 FSI。
     val pi = fireIntent(id, (id * 7 + 13).toInt(), force = true)
     val at = System.currentTimeMillis() + 60_000L
     AtkDiag.log(context, "排程: 60 秒后真实触发测试 id=$id")
-    // 3.6.0：第三个参数必须是 Long（任务 id），此前误传字符串「测试$id」会编译失败。
     setExactAlarm(at, pi, id)
   }
 

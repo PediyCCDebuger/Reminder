@@ -2,6 +2,16 @@
 
 每个 Release 的说明都取自本文件对应版本的小节，由打包工作流自动写入 GitHub Release。
 
+## [3.6.1] - 2026-11-12
+
+### 修复（真机日志定位：setExactAndAllowWhileIdle 在深睡/Doze 下被延后投递）
+
+**根因**：3.6.0 把排程从 `setAlarmClock` 改成了 `setExactAndAllowWhileIdle`（对齐 SunriseAlarm 的假设）。但实测：60 秒测试在 `20:28:33` 排程，实际到 `20:31:04` 才 `触发`（约 91 秒后，且必须等你解锁唤醒设备才送达），日志里 `执行界面: Activity 创建 锁屏=false`——说明闹钟在锁屏休眠时被系统**延后投递**，而非界面链路问题。这正是 `setExactAndAllowWhileIdle` 在 ColorOS 深睡 / Doze 下的典型行为：它不保证唤醒设备。
+
+**修复**：主排程与 60 秒测试都改回 **`AlarmManager.setAlarmClock`**——这是 Android 唯一保证从深睡唤醒设备、不受 Doze 延后的**用户闹钟类型**，且不需要 `SCHEDULE_EXACT_ALARM` 权限。这正好对齐本机验证可用的 **Smart Alarm-v2.7.7**：它主排程用的就是 `setAlarmClock`（其 `Alarms.enableAlertDesableSnooze` 第 340 行），而界面由前台服务直接 `startActivity` 拉起（3.6.0 已做对）。此前 3.0.0–3.5.0 不敢用 `setAlarmClock` 是因为它压制了当时的 FSI 主路径；3.6.0 起界面已不依赖 FSI，故 `setAlarmClock` + 直接 `startActivity` 正好等价于 Smart Alarm 的可用组合。
+
+**保留**：3.6.0 的前台服务直接拉起执行界面、亮屏唤醒锁、`setShowWhenLocked`+`setTurnScreenOn`、日志隐私/去重、复制/导出日志、编辑后询问激活等全部特性。声音本就用 `USAGE_ALARM` 闹钟音频流，路由正常，之前“无声音”只是因为闹钟没按时触发。
+
 ## [3.6.0] - 2026-11-12
 
 ### 修复（真机日志定位 + 逆向 Smart Alarm-v2.7.7：FSI 被吞，须由前台服务直接 startActivity）
