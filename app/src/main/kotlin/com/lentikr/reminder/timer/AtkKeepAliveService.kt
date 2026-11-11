@@ -1,6 +1,7 @@
 package com.lentikr.reminder.timer
 
 import com.lentikr.reminder.MainActivity
+import com.lentikr.reminder.R
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
