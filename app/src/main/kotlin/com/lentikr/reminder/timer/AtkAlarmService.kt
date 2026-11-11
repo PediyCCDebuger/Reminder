@@ -43,6 +43,8 @@ class AtkAlarmService : Service() {
   private var foreground = false
   /** Avoid re-cancelling (and re-alerting) the same alarm when onCreate starts us again. */
   private var mountedId = -1L
+  /** Raise the 执行界面 once per service lifetime, so Activity -> service -> Activity cannot loop. */
+  private var faceRequested = false
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -120,9 +122,12 @@ class AtkAlarmService : Service() {
       engine.showNotification(item, fullScreen = true, force = force)
     }
     // Now that the process is genuinely in the foreground, a direct launch is allowed again
-    // (Android 10+ blocks it from a background broadcast). dedupe stops the
-    // Activity -> service -> Activity loop.
-    engine.launchAlarmFace(id, force, dedupe = true)
+    // (Android 10+ blocks it from a background broadcast). Once per service lifetime plus
+    // launchAlarmFace's 8s dedupe stops any Activity -> service -> Activity loop.
+    if (!faceRequested) {
+      faceRequested = true
+      engine.launchAlarmFace(id, force, dedupe = true)
+    }
 
     runCatching { AtkStore(this).log(id, 1, item.name) }
     runCatching { engine.schedule(item) }
@@ -245,6 +250,7 @@ class AtkAlarmService : Service() {
       currentId = -1L
     }
     mountedId = -1L
+    faceRequested = false
     stopSelf(startId)
   }
 

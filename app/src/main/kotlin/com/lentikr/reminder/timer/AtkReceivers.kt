@@ -179,6 +179,10 @@ object AtkAlarmSound {
     // Activate the media session AFTER the player is up so the mediaPlayback foreground service
     // is genuinely playing media when startForeground claims that type.
     activateSession(app)
+    // 3.1.0: take the CPU wake lock LAST. play() calls stop() at its start, and stop() releases
+    // this lock, so acquiring it before play() would silently undo it (Smart Alarm holds the
+    // lock for the whole ringing period).
+    holdCpu(app)
   }
 
   /**
@@ -366,9 +370,9 @@ class AtkReceiver : BroadcastReceiver() {
           // as the FOREGROUND SERVICE's startForeground() notification; Smart Alarm posts it
           // from inside its LaunchAlarm service. So the notification now belongs to the
           // service, never to this broadcast.
-          AtkAlarmSound.holdCpu(context)
           engine.ensureChannel()
           // 1) Tone first: a killed/slow service must not leave the alarm silent.
+          //    play() also acquires the CPU wake lock for the whole ringing period.
           AtkAlarmSound.play(context, item)
           // 2) Start the FGS; IT mounts the full-screen notification via startForeground()
           //    and, once the process is foreground, raises the 执行界面 as a fallback.
@@ -386,7 +390,6 @@ class AtkReceiver : BroadcastReceiver() {
         val item = if (id >= 0) store.get(id) else null
         AtkDiag.log(context, "贪睡到点 id=$id 任务=${item?.name}")
         if (item != null && item.enabled) {
-          AtkAlarmSound.holdCpu(context)
           engine.ensureChannel()
           AtkAlarmSound.play(context, item)
           startAlarmService(context, engine, id, false)
