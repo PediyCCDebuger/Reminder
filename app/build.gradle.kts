@@ -28,8 +28,8 @@ android {
     applicationId = "app.lentikr.reminder"
     minSdk = 29
     targetSdk = 37
-    versionCode = 23
-    versionName = "2.2.0"
+    versionCode = 41
+    versionName = "3.6.4"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -139,6 +139,8 @@ dependencies {
   ksp(libs.androidx.room3.compiler)
   implementation(libs.androidx.datastore.preferences)
   implementation(libs.kotlinx.serialization.json)
+  // 3.6.4：自动更新 / 协程作用域（Dispatchers.Main + IO）需要 Android 版协程。
+  implementation(libs.kotlinx.coroutines.android)
 
   // Chinese lunar calendar
   implementation(libs.tyme)

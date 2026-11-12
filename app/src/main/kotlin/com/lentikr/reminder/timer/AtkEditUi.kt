@@ -1,10 +1,20 @@
 package com.lentikr.reminder.timer
 
+import android.app.Activity
 import android.app.DatePickerDialog
-import android.app.TimePickerDialog
+import android.content.Context
+import android.content.Intent
+import android.media.RingtoneManager
+import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,22 +22,40 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import cn.nnci.addintimer.Rule
 import java.time.LocalDate
+import java.time.LocalTime
 import java.util.Locale
 
 private data class ChoiceState(
@@ -51,6 +79,20 @@ private data class InputState(
   val onPick: (String) -> Unit,
 )
 
+/** Pending 选择时间 popup: original hour/minute stepper instead of the Material clock dial. */
+private data class TimeState(
+  val hour: Int,
+  val minute: Int,
+  val onPick: (Int, Int) -> Unit,
+)
+
+/** Pending ringtone/music picker: label → stored value (URI, 缺省铃音, 无). */
+private data class RingListState(
+  val title: String,
+  val options: List<Pair<String, String>>,
+  val selected: String,
+)
+
 /**
  * AddinTimer 定时提醒 property editor: silver title strip, two chunky tabs,
  * grouped spinners, and the blue-framed 确定 / 取消 bar at the bottom.
@@ -59,12 +101,13 @@ private data class InputState(
 fun AtkEditScreen(
   item: AtkItem?,
   preset: Int = 0,
+  page: Int = 0,
   onSave: (AtkItem) -> Unit,
   onClose: () -> Unit,
   onMessage: (String) -> Unit,
 ) {
-  val draft = remember(item?.id, preset) {
-    if (item != null) AtkItem.parse(item.id, item.param()) else AtkItem.newAlarm(preset)
+  val draft = remember(item?.id, preset, page) {
+    if (item != null) AtkItem.parse(item.id, item.param()) else AtkItem.newAlarm(preset, page)
   }
   var tab by remember { mutableIntStateOf(0) }
   var revision by remember { mutableIntStateOf(0) }
@@ -76,7 +119,7 @@ fun AtkEditScreen(
       .fillMaxSize()
       .background(AtkSkin.bg),
   ) {
-    AtkTitleBar("定时提醒")
+    AtkTitleBar(if (draft.kind == "ALARM") "定时提醒" else draft.kindLabel())
     Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)) {
       AtkTabButton("◐", "时间设置", tab == 0, { tab = 0 }, Modifier.weight(1f))
       Spacer(Modifier.width(6.dp))
@@ -111,6 +154,7 @@ private fun TimeTab(draft: AtkItem, change: (() -> Unit) -> Unit) {
   var choice by remember { mutableStateOf<ChoiceState?>(null) }
   var multi by remember { mutableStateOf<MultiState?>(null) }
   var input by remember { mutableStateOf<InputState?>(null) }
+  var time by remember { mutableStateOf<TimeState?>(null) }
 
   fun pickDate(y: Int, m: Int, d: Int, cb: (Int, Int, Int) -> Unit) {
     val yy = if (y > 0) y else LocalDate.now().year
@@ -124,7 +168,7 @@ private fun TimeTab(draft: AtkItem, change: (() -> Unit) -> Unit) {
   }
 
   fun pickTime(h: Int, m: Int, cb: (Int, Int) -> Unit) {
-    TimePickerDialog(context, { _, hour, minute -> cb(hour, minute) }, h, m, true).show()
+    time = TimeState(h.coerceIn(0, 23), m.coerceIn(0, 59), cb)
   }
 
   Column(
@@ -305,6 +349,241 @@ private fun TimeTab(draft: AtkItem, change: (() -> Unit) -> Unit) {
   input?.let { n ->
     AtkInputDialog(n.title, n.initial, { n.onPick(it); input = null }, { input = null }, n.numeric)
   }
+  time?.let { t ->
+    AtkTimePickerDialog(
+      initialHour = t.hour,
+      initialMinute = t.minute,
+      onConfirm = { h, m -> t.onPick(h, m); time = null },
+      onDismiss = { time = null },
+    )
+  }
+}
+
+/**
+ * The original 选择时间 popup: dark card, clock glyph + title, two stepper columns for hour and
+ * minute, and a 设置 / 现在 / 取消 row at the bottom. Replaces the Material clock dial, which the
+ * user rejected as "not the original".
+ *
+ * 2.6.0 adds the two things the original also allowed and the first version missed:
+ *   • the hour / minute boxes are now editable — tap and type instead of clicking +/- twenty times;
+ *   • the +/- buttons step by a selectable amount (1 / 5 / 10 分钟), with carry into the hour
+ *     (11:58 +5 → 12:03) instead of wrapping inside the minute column.
+ */
+@Composable
+private fun AtkTimePickerDialog(
+  initialHour: Int,
+  initialMinute: Int,
+  onConfirm: (Int, Int) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  var hour by remember { mutableIntStateOf(initialHour.coerceIn(0, 23)) }
+  var minute by remember { mutableIntStateOf(initialMinute.coerceIn(0, 59)) }
+  var step by remember { mutableIntStateOf(1) }
+
+  fun shift(delta: Int) {
+    val total = ((hour * 60 + minute + delta) % 1440 + 1440) % 1440
+    hour = total / 60
+    minute = total % 60
+  }
+
+  Dialog(onDismissRequest = onDismiss) {
+    Column(
+      Modifier
+        .width(320.dp)
+        .background(Color(0xFF1B1B1B))
+        .border(1.dp, Color(0xFF4A4A4A)),
+    ) {
+      Row(
+        Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Text("◔", color = Color.White, fontSize = 17.sp)
+        Spacer(Modifier.width(8.dp))
+        Text("选择时间", color = Color.White, fontSize = 15.sp)
+      }
+      Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF3C3C3C)))
+      Row(
+        Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 10.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        TimeStepperColumn(
+          value = hour,
+          max = 23,
+          onStepUp = { shift(60) },
+          onStepDown = { shift(-60) },
+          onSet = { hour = it.coerceIn(0, 23) },
+        )
+        Text(":", color = Color.White, fontSize = 30.sp, modifier = Modifier.padding(horizontal = 8.dp))
+        TimeStepperColumn(
+          value = minute,
+          max = 59,
+          onStepUp = { shift(step) },
+          onStepDown = { shift(-step) },
+          onSet = { minute = it.coerceIn(0, 59) },
+        )
+      }
+      Row(
+        Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Text("每次增减", color = Color(0xFF9A9A9A), fontSize = 13.sp)
+        Spacer(Modifier.width(10.dp))
+        TimeStepChip("1 分钟", step == 1) { step = 1 }
+        Spacer(Modifier.width(8.dp))
+        TimeStepChip("5 分钟", step == 5) { step = 5 }
+        Spacer(Modifier.width(8.dp))
+        TimeStepChip("10 分钟", step == 10) { step = 10 }
+      }
+      Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 14.dp)) {
+        TimeDialogButton("设置", Modifier.weight(1f)) { onConfirm(hour, minute) }
+        Spacer(Modifier.width(10.dp))
+        TimeDialogButton("现在", Modifier.weight(1f)) {
+          val now = LocalTime.now()
+          onConfirm(now.hour, now.minute)
+        }
+        Spacer(Modifier.width(10.dp))
+        TimeDialogButton("取消", Modifier.weight(1f), onDismiss)
+      }
+    }
+  }
+}
+
+/**
+ * One hour/minute column: silver "+" bar, an editable white value box, silver "−" bar.
+ * [+] and [−] step by the caller-supplied amount (hour steps a whole hour, minute steps the
+ * selected 1/5/10), and carry into the other field through [AtkTimePickerDialog.shift]. The
+ * editable box sets its OWN field absolutely (see TimeValueField) so typing the hour never
+ * disturbs the minute and the typed digits are never overwritten.
+ */
+@Composable
+private fun TimeStepperColumn(
+  value: Int,
+  max: Int,
+  onStepUp: () -> Unit,
+  onStepDown: () -> Unit,
+  onSet: (Int) -> Unit,
+) {
+  Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    TimeStepBar("+") { onStepUp() }
+    Spacer(Modifier.height(8.dp))
+    TimeValueField(value, max, onSet)
+    Spacer(Modifier.height(8.dp))
+    TimeStepBar("−") { onStepDown() }
+  }
+}
+
+/**
+ * White box that accepts a typed number, exactly like the original's editable time field.
+ *
+ * The typed value is reported back as an ABSOLUTE value for this field (hour or minute), never a
+ * delta: typing 8 into the hour box must set the hour to 8, leaving the minute untouched. The
+ * caller's step buttons still drive the shared carry via shift(), so a minute step of 5 at 11:58
+ * still rolls over into 12:03.
+ *
+ * Re-formatting is limited to (a) an outside change (a +/- tap, value != shown digits) and
+ * (b) losing focus, so the user's keystrokes are never clobbered mid-edit.
+ */
+@Composable
+private fun TimeValueField(value: Int, max: Int, onSet: (Int) -> Unit) {
+  var text by remember { mutableStateOf(String.format(Locale.CHINA, "%02d", value)) }
+  val interactionSource = remember { MutableInteractionSource() }
+  val focused by interactionSource.collectIsFocusedAsState()
+  LaunchedEffect(value) {
+    val cur = text.toIntOrNull()
+    if (cur != null && cur != value) {
+      text = String.format(Locale.CHINA, "%02d", value)
+    }
+  }
+  LaunchedEffect(focused) {
+    if (!focused) {
+      val cur = text.toIntOrNull() ?: value
+      text = String.format(Locale.CHINA, "%02d", cur.coerceIn(0, max))
+    }
+  }
+  Box(
+    Modifier.width(86.dp).height(52.dp).background(Color(0xFFF6F6F6)),
+    contentAlignment = Alignment.Center,
+  ) {
+    BasicTextField(
+      value = text,
+      onValueChange = { raw ->
+        val digits = raw.filter { it.isDigit() }.take(2)
+        when {
+          digits.isEmpty() -> {
+            text = ""
+            onSet(0)
+          }
+          else -> {
+            val n = digits.toIntOrNull() ?: 0
+            val clamped = n.coerceIn(0, max)
+            // Show the clamped two-digit form only when the typed value was actually out of
+            // range, so an in-range edit never flashes a reformatted string under the cursor.
+            text = if (clamped == n) digits else String.format(Locale.CHINA, "%02d", clamped)
+            onSet(clamped)
+          }
+        }
+      },
+      singleLine = true,
+      interactionSource = interactionSource,
+      textStyle = TextStyle(
+        color = Color(0xFF111111),
+        fontSize = 30.sp,
+        textAlign = TextAlign.Center,
+      ),
+      keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+      cursorBrush = SolidColor(Color(0xFF111111)),
+      modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+    )
+  }
+}
+
+@Composable
+private fun TimeStepBar(label: String, onClick: () -> Unit) {
+  Box(
+    Modifier
+      .width(86.dp)
+      .height(38.dp)
+      .background(AtkSkin.silver)
+      .border(1.dp, Color(0xFF9A9A9A))
+      .clickable(onClick = onClick),
+    contentAlignment = Alignment.Center,
+  ) {
+    Text(label, color = Color(0xFF333333), fontSize = 24.sp, fontWeight = FontWeight.Bold)
+  }
+}
+
+@Composable
+private fun TimeStepChip(label: String, selected: Boolean, onClick: () -> Unit) {
+  Box(
+    Modifier
+      .height(30.dp)
+      .background(if (selected) SolidColor(Color(0xFF1490DE)) else AtkSkin.silver)
+      .border(1.dp, if (selected) Color(0xFF0F6FA8) else Color(0xFF9A9A9A))
+      .clickable(onClick = onClick)
+      .padding(horizontal = 9.dp),
+    contentAlignment = Alignment.Center,
+  ) {
+    Text(
+      label,
+      color = if (selected) Color.White else Color(0xFF333333),
+      fontSize = 13.sp,
+    )
+  }
+}
+
+@Composable
+private fun TimeDialogButton(text: String, modifier: Modifier, onClick: () -> Unit) {
+  Box(
+    modifier
+      .height(42.dp)
+      .background(AtkSkin.silver)
+      .border(1.dp, Color(0xFF9A9A9A))
+      .clickable(onClick = onClick),
+    contentAlignment = Alignment.Center,
+  ) {
+    Text(text, color = Color(0xFF222222), fontSize = 15.sp)
+  }
 }
 
 private fun dateText(y: Int, m: Int, d: Int): String =
@@ -331,6 +610,41 @@ private fun ParamTab(draft: AtkItem, change: (() -> Unit) -> Unit, onMessage: (S
   var multi by remember { mutableStateOf<MultiState?>(null) }
   var input by remember { mutableStateOf<InputState?>(null) }
   var pathChoice by remember { mutableStateOf(false) }
+  var ringList by remember { mutableStateOf<RingListState?>(null) }
+
+  val audioPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+    android.Manifest.permission.READ_MEDIA_AUDIO
+  } else {
+    android.Manifest.permission.READ_EXTERNAL_STORAGE
+  }
+  val askAudio = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+    if (granted) {
+      val music = AtkRingtone.mediaMusic(context)
+      if (music.isEmpty()) {
+        onMessage("媒体库里没有找到音频文件，请改用系统铃声或从文件选择")
+        pathChoice = true
+      } else {
+        ringList = RingListState("选择音乐", music, draft.actValue(7))
+      }
+    } else {
+      onMessage("未授予读取媒体库权限，可改用系统铃声或从文件选择铃声")
+      pathChoice = true
+    }
+  }
+
+  fun openMusicPicker() {
+    if (context.checkSelfPermission(audioPermission) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+      val music = AtkRingtone.mediaMusic(context)
+      if (music.isEmpty()) {
+        onMessage("媒体库里没有找到音频文件，请改用系统铃声或从文件选择")
+        pathChoice = true
+      } else {
+        ringList = RingListState("选择音乐", music, draft.actValue(7))
+      }
+    } else {
+      askAudio.launch(audioPermission)
+    }
+  }
 
   val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
     if (uri != null) {
@@ -342,7 +656,59 @@ private fun ParamTab(draft: AtkItem, change: (() -> Unit) -> Unit, onMessage: (S
         // Some providers do not offer persistable permissions.
       }
       change { draft.setAct(7, uri.toString()) }
-      onMessage("已选择铃声：" + uri.lastPathSegment.orEmpty())
+      onMessage("已选择铃声：" + AtkRingtone.nameOf(context, uri))
+    }
+  }
+
+  /**
+   * 系统铃声 → the system's own ringtone picker (ACTION_RINGTONE_PICKER). On ColorOS this is the
+   * 经典铃声 / 自然铃声 / 本地铃声 / 在线铃声 page — exactly what the original AddinTimer opened.
+   * The in-app radio list remains only as a fallback for ROMs without a ringtone picker.
+   */
+  val pickSystemRingtone = rememberLauncherForActivityResult(
+    ActivityResultContracts.StartActivityForResult(),
+  ) { result ->
+    if (result.resultCode == Activity.RESULT_OK) {
+      val data = result.data
+      val uri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI, Uri::class.java)
+      } else {
+        @Suppress("DEPRECATION")
+        data?.getParcelableExtra(RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+      }
+      if (uri == null) {
+        change { draft.setAct(7, AtkRingtone.SILENT_LABEL) }
+        onMessage("已选择「无」：该任务不响铃")
+      } else {
+        try {
+          context.contentResolver.takePersistableUriPermission(
+            uri, Intent.FLAG_GRANT_READ_URI_PERMISSION,
+          )
+        } catch (e: Exception) {
+          // System ringtone URIs are world-readable; persistence is best effort.
+        }
+        change { draft.setAct(7, uri.toString()) }
+        onMessage("已选择铃声：" + AtkRingtone.nameOf(context, uri))
+      }
+    }
+  }
+
+  fun openSystemRingtone() {
+    val current = try { AtkRingtone.resolve(context, draft) } catch (e: Exception) { null }
+    val intent = Intent(RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+      putExtra(RingtoneManager.EXTRA_RINGTONE_TYPE, RingtoneManager.TYPE_ALARM)
+      putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+      putExtra(RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true)
+      putExtra(RingtoneManager.EXTRA_RINGTONE_TITLE, "铃声")
+      if (current != null) {
+        putExtra(RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, current)
+      }
+    }
+    try {
+      pickSystemRingtone.launch(intent)
+    } catch (e: Exception) {
+      // No ringtone picker on this ROM: keep the in-app list usable.
+      ringList = RingListState("铃声", AtkRingtone.systemRingtones(context), draft.actValue(7))
     }
   }
 
@@ -394,9 +760,17 @@ private fun ParamTab(draft: AtkItem, change: (() -> Unit) -> Unit, onMessage: (S
             }
           }
           FieldKind.TEXT -> {
-            AtkSpinnerRow(spec.label, raw.ifBlank { "缺省铃音" }) {
+            // 选择路径 shows the resolved file name, never a truncated content:// URI.
+            val shown = if (spec.index == 7) {
+              AtkRingtone.title(context, draft)
+            } else {
+              raw.ifBlank { "(空)" }
+            }
+            AtkSpinnerRow(spec.label, shown) {
               if (spec.index == 7) {
-                pathChoice = true
+                val type = AtkItem.intOf(draft.actValue(6))
+                // 媒体库 / 指定音乐: straight to the music list, exactly like the original.
+                if (type == 1 || type == 3) openMusicPicker() else pathChoice = true
               } else {
                 input = InputState(spec.label, raw) { v -> change { draft.setAct(spec.index, v) } }
               }
@@ -432,13 +806,106 @@ private fun ParamTab(draft: AtkItem, change: (() -> Unit) -> Unit, onMessage: (S
       { i ->
         pathChoice = false
         when (i) {
-          0 -> change { draft.setAct(7, "缺省铃音") }
-          1 -> change { draft.setAct(7, "系统铃声") }
-          2 -> pickFile.launch(arrayOf("audio/*", "*/*"))
+          0 -> change { draft.setAct(7, AtkRingtone.DEFAULT_LABEL) }
+          // 系统铃声 opens the ROM's own ringtone picker, exactly like the original app.
+          1 -> openSystemRingtone()
+          2 -> pickFile.launch(arrayOf("audio/*"))
           3 -> input = InputState("选择路径", draft.actValue(7)) { v -> change { draft.setAct(7, v) } }
         }
       },
       { pathChoice = false },
     )
+  }
+  ringList?.let { r ->
+    AtkRadioDialog(
+      title = r.title,
+      options = r.options,
+      selectedValue = r.selected,
+      onConfirm = { value -> change { draft.setAct(7, value) }; ringList = null },
+      onDismiss = { ringList = null },
+    )
+  }
+}
+
+/**
+ * Single-choice list with an explicit 确定 / 取消 row, matching the original 铃声 and 选择音乐
+ * pickers (outlined radio marks with a green dot, white panel, black title strip).
+ */
+@Composable
+private fun AtkRadioDialog(
+  title: String,
+  options: List<Pair<String, String>>,
+  selectedValue: String,
+  onConfirm: (String) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  var picked by remember { mutableStateOf(selectedValue) }
+  Dialog(onDismissRequest = onDismiss) {
+    Column(Modifier.width(330.dp).background(Color.White)) {
+      AtkDialogTitle(title)
+      LazyColumn(Modifier.fillMaxWidth().heightIn(max = 380.dp)) {
+        items(options) { entry ->
+          Row(
+            Modifier
+              .fillMaxWidth()
+              .background(Color.White)
+              .clickable { picked = entry.second }
+              .padding(horizontal = 16.dp, vertical = 13.dp),
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Text(
+              entry.first,
+              color = Color.Black,
+              fontSize = 16.sp,
+              modifier = Modifier.weight(1f),
+            )
+            Box(
+              Modifier
+                .size(22.dp)
+                .border(2.dp, Color(0xFF9E9E9E), CircleShape),
+              contentAlignment = Alignment.Center,
+            ) {
+              if (picked == entry.second) {
+                Box(Modifier.size(12.dp).background(AtkSkin.green, CircleShape))
+              }
+            }
+          }
+          AtkLightDivider()
+        }
+      }
+      Row(
+        Modifier.fillMaxWidth().background(Color(0xFFD2D2D2)).padding(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        DialogActionButton("✗", "取消", AtkSkin.red, Modifier.weight(1f), onDismiss)
+        Spacer(Modifier.width(10.dp))
+        DialogActionButton("✓", "确定", AtkSkin.green, Modifier.weight(1f)) { onConfirm(picked) }
+      }
+    }
+  }
+}
+
+/** Silver pill button with a coloured glyph, matching the bottom bar of the editor. */
+@Composable
+private fun DialogActionButton(
+  symbol: String,
+  text: String,
+  symbolColor: Color,
+  modifier: Modifier,
+  onClick: () -> Unit,
+) {
+  Box(
+    modifier
+      .height(46.dp)
+      .background(AtkSkin.silver)
+      .border(1.dp, Color(0xFF9A9A9A))
+      .clickable(onClick = onClick),
+    contentAlignment = Alignment.Center,
+  ) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Text(symbol, color = symbolColor, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+      Spacer(Modifier.width(8.dp))
+      Text(text, color = AtkSkin.ink, fontSize = 17.sp)
+    }
   }
 }

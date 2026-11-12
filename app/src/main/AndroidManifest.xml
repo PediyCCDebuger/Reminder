@@ -5,6 +5,9 @@
          Android 14+, SCHEDULE_EXACT_ALARM is the user-toggleable fallback. -->
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <!-- 3.6.4：自动更新需要访问网络与安装 APK。 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -12,6 +15,18 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- The alarm rings through a foreground service of type mediaPlayback. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- Optional, user-granted: letting the alarm surface pop up over other apps on ROMs that
+         ignore full-screen intents. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 选择路径 → 媒体库: listing audio files for the ringtone picker. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <application
         android:name=".ReminderApp"
@@ -34,13 +49,15 @@
             </intent-filter>
         </activity>
 
-        <!-- Full-screen alarm surface shown by the high-priority notification. -->
+        <!-- Full-screen alarm surface shown by the high-priority notification. exported=true:
+             SystemUI launches this across processes through the full-screen intent, and some
+             ROMs refuse an unexported Activity there. The Activity itself validates EXTRA_ID. -->
         <activity
             android:name=".timer.AtkAlarmActivity"
-            android:exported="false"
+            android:exported="true"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
-            android:theme="@style/Theme.Reminder" />
+            android:theme="@style/Theme.Reminder.Alarm" />
 
         <receiver
             android:name=".timer.AtkReceiver"
@@ -53,6 +70,20 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!-- Keeps a firing alarm ringing while the screen is locked: hold a wake lock and play
+             the configured tone until 终止 / 贪睡. specialUse is the PRIMARY type (SunriseAlarm
+             uses it and works on OnePlus/ColorOS); mediaPlayback stays declared as a fallback
+             because Android 14+ tears down a mediaPlayback FGS with no visible MediaSession
+             after ~1s — that kill was the "svc: onDestroy（前台=true）" in the 2.8.0 log. -->
+        <service
+            android:name=".timer.AtkAlarmService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="alarm_ringing" />
+        </service>
 
         <!-- Serves rendered share images from cache/shared/ to the share sheet. -->
         <provider

@@ -22,6 +22,9 @@ keystore.properties
 *.jks
 *.keystore
 *.p12
+# The local base64 keystore is the offline source for the GitHub Secrets upload; it is NOT
+# published and must never be committed. CI reads the key from repository secrets only.
+.github/signing/
 
 # Packages built outside build/, e.g. Android Studio's "Generate Signed APK" output in app/release/
 *.apk

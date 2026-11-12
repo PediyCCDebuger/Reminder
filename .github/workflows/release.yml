@@ -36,6 +36,17 @@ jobs:
           echo "VERSION=$version" >> "$GITHUB_ENV"
           echo "TAG=$tag" >> "$GITHUB_ENV"
 
+      - name: Compose release notes from CHANGELOG
+        run: |
+          python3 - <<'PY' > "$RUNNER_TEMP/notes.md"
+          import os, re
+          v = os.environ["VERSION"]
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          m = re.search(r"^## \[" + re.escape(v) + r"\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.M | re.S)
+          print(m.group(0).strip() if m else "版本 " + v)
+          PY
+          cat "$RUNNER_TEMP/notes.md"
+
       - uses: actions/setup-java@v6
         with:
           distribution: temurin
@@ -43,8 +54,7 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
 
-      # Prefer a repository-supplied keystore. When none is configured, generate a local one so
-      # the release always ships *signed* APKs instead of failing or producing unsigned files.
+      # Fixed public debug key: see build-apk.yml. Secrets take precedence when configured.
       - name: Restore or create signing key
         id: signing
         env:
@@ -54,12 +64,15 @@ jobs:
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
             echo "password=$SECRET_PASSWORD" >> "$GITHUB_OUTPUT"
+          elif [ -f .github/signing/release.keystore.b64 ]; then
+            base64 --decode .github/signing/release.keystore.b64 > "$RUNNER_TEMP/release.jks"
+            echo "password=addintimer" >> "$GITHUB_OUTPUT"
           else
             keytool -genkeypair -v \
               -keystore "$RUNNER_TEMP/release.jks" \
               -alias reminder -keyalg RSA -keysize 2048 -validity 10000 \
               -storepass addintimer -keypass addintimer \
-              -dname "CN=AddinTimer Revive, OU=Personal, O=Personal, L=CN, ST=CN, C=CN"
+              -dname "CN=Reminder Revive, OU=Personal, O=Personal, L=CN, ST=CN, C=CN"
             echo "password=addintimer" >> "$GITHUB_OUTPUT"
           fi
 
@@ -91,12 +104,13 @@ jobs:
           cp "$out/app-armeabi-v7a-release.apk" "$dist/AddinTimerRevive-$VERSION-armeabi-v7a.apk"
           cp "$out/app-universal-release.apk"   "$dist/AddinTimerRevive-$VERSION-universal.apk"
           (cd "$dist" && sha256sum *.apk > SHA256SUMS)
-          args=(--title "AddinTimer 复刻版 $VERSION" --generate-notes)
-          if [ "$EVENT" = "push" ]; then args+=(--verify-tag); fi
-          if [[ "$TAG" == *-* ]]; then args+=(--prerelease); fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$dist"/* --clobber
+            gh release edit "$TAG" --notes-file "$RUNNER_TEMP/notes.md"
           else
+            args=(--title "Reminder $VERSION · AddinTimer 复刻版" --notes-file "$RUNNER_TEMP/notes.md")
+            if [ "$EVENT" = "push" ]; then args+=(--verify-tag); fi
+            if [[ "$TAG" == *-* ]]; then args+=(--prerelease); fi
             gh release create "$TAG" "$dist"/* "${args[@]}"
           fi
 

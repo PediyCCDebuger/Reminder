@@ -14,11 +14,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
@@ -103,6 +105,8 @@ fun AtkTitleBar(
   suffixColor: Color = AtkSkin.red,
   onBack: (() -> Unit)? = null,
   onMenu: (() -> Unit)? = null,
+  onSelect: (() -> Unit)? = null,
+  selectMode: Boolean = false,
 ) {
   Box(
     Modifier
@@ -125,6 +129,15 @@ fun AtkTitleBar(
         Text(suffix, color = suffixColor, fontSize = 14.sp, fontWeight = FontWeight.Bold)
       }
       Spacer(Modifier.weight(1f))
+      if (onSelect != null) {
+        Text(
+          if (selectMode) "取消多选" else "多选",
+          color = if (selectMode) AtkSkin.red else Color(0xFF333333),
+          fontSize = 14.sp,
+          fontWeight = FontWeight.Bold,
+          modifier = Modifier.clickable(onClick = onSelect).padding(horizontal = 8.dp),
+        )
+      }
       if (onMenu != null) {
         Text(
           "≡", color = Color(0xFF333333), fontSize = 22.sp, fontWeight = FontWeight.Bold,
@@ -286,7 +299,12 @@ private fun AtkActionButton(
   }
 }
 
-/** Classic single-choice spinner popup (dark caption, white list, grey cancel). */
+/**
+ * Classic single-choice spinner popup, matching AddinTimer 2.1G: black caption, white list,
+ * an outlined radio circle on EVERY row with a green filled dot on the selected one, and a grey
+ * cancel strip. (3.0.0: the previous build drew a blue caption, a light-blue highlight and a
+ * small blue text dot — none of which exists in the original.)
+ */
 @Composable
 fun AtkChoiceDialog(
   title: String,
@@ -296,27 +314,81 @@ fun AtkChoiceDialog(
   onDismiss: () -> Unit,
 ) {
   Dialog(onDismissRequest = onDismiss) {
-    Column(Modifier.fillMaxWidth().background(AtkSkin.lightPanel)) {
+    Column(Modifier.fillMaxWidth().background(Color.White)) {
       AtkDialogTitle(title)
       LazyColumn(Modifier.fillMaxWidth().heightIn(max = 430.dp)) {
         itemsIndexed(options) { index, option ->
-          Box(
+          Row(
             Modifier
               .fillMaxWidth()
-              .heightIn(min = 48.dp)
-              .background(
-                if (index == selected) Color(0xFFDCEBFA) else Color.White,
-              )
+              .heightIn(min = 56.dp)
+              .background(Color.White)
               .clickable { onPick(index) }
-              .padding(horizontal = 16.dp, vertical = 12.dp),
-            contentAlignment = Alignment.CenterStart,
+              .padding(horizontal = 18.dp),
+            verticalAlignment = Alignment.CenterVertically,
           ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-              Text(option, color = Color.Black, fontSize = 17.sp, modifier = Modifier.weight(1f))
-              if (index == selected) Text("●", color = AtkSkin.blue, fontSize = 12.sp)
+            Text(
+              option,
+              color = Color.Black,
+              fontSize = 18.sp,
+              modifier = Modifier.weight(1f),
+            )
+            // Outlined radio circle on every row (not just the selected one); the selected
+            // row gets the original's green filled dot inside it.
+            Box(
+              Modifier
+                .size(24.dp)
+                .border(2.dp, Color(0xFF9E9E9E), CircleShape),
+              contentAlignment = Alignment.Center,
+            ) {
+              if (index == selected) {
+                Box(Modifier.size(13.dp).background(AtkSkin.green, CircleShape))
+              }
             }
           }
           AtkLightDivider()
+        }
+      }
+      AtkDialogCancel(onDismiss)
+    }
+  }
+}
+
+/**
+ * 修改图标 picker for 管理标签: black caption, white emoji grid, grey cancel — the same
+ * classic window style as [AtkChoiceDialog].
+ */
+@Composable
+fun AtkIconPickerDialog(
+  current: String,
+  onPick: (String) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  Dialog(onDismissRequest = onDismiss) {
+    Column(Modifier.fillMaxWidth().background(Color.White)) {
+      AtkDialogTitle("修改图标")
+      Column(Modifier.fillMaxWidth().padding(10.dp)) {
+        AtkTags.ICONS.chunked(5).forEach { row ->
+          Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+            row.forEach { icon ->
+              Box(
+                Modifier
+                  .padding(4.dp)
+                  .size(54.dp)
+                  .clip(RoundedCornerShape(4.dp))
+                  .border(
+                    2.dp,
+                    if (icon == current) AtkSkin.green else Color(0xFFE0E0E0),
+                    RoundedCornerShape(4.dp),
+                  )
+                  .background(if (icon == current) Color(0xFFF2FBE9) else Color.White)
+                  .clickable { onPick(icon) },
+                contentAlignment = Alignment.Center,
+              ) {
+                Text(icon, fontSize = 26.sp)
+              }
+            }
+          }
         }
       }
       AtkDialogCancel(onDismiss)
@@ -356,7 +428,7 @@ fun AtkMultiDialog(
               Modifier
                 .size(24.dp)
                 .border(2.dp, Color(0xFF888888), RoundedCornerShape(2.dp))
-                .background(if (index in temp) Color(0xFFDCEBFA) else Color.White),
+                .background(Color.White),
               contentAlignment = Alignment.Center,
             ) {
               if (index in temp) {
@@ -443,14 +515,15 @@ fun AtkMessageDialog(
   }
 }
 
+/** Original AddinTimer dialogs use a plain black caption strip with white regular-weight text. */
 @Composable
-private fun AtkDialogTitle(text: String) {
+fun AtkDialogTitle(text: String) {
   Box(
-    Modifier.fillMaxWidth().height(46.dp).background(AtkSkin.dialogBlue),
+    Modifier.fillMaxWidth().height(48.dp).background(Color(0xFF111111)),
     contentAlignment = Alignment.CenterStart,
   ) {
     Text(
-      text, color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold,
+      text, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Normal,
       modifier = Modifier.padding(horizontal = 16.dp),
     )
   }
@@ -486,13 +559,11 @@ fun AtkLightDivider() {
   Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFFD8D8D8)))
 }
 
-/** Bottom tab strip: 常用 / 生活 / 纪念日 / 生日 (page 100..103). */
+/** Bottom tab strip: labels come from 管理标签 (editable names + icons, page 100 + index). */
 @Composable
-fun AtkTabBar(selected: Int, onSelect: (Int) -> Unit) {
-  val icons = listOf("\uD83C\uDF3C", "\u2602", "\uD83D\uDCC5", "\uD83C\uDF88")
-  val names = listOf("常用", "生活", "纪念日", "生日")
+fun AtkTabBar(selected: Int, onSelect: (Int) -> Unit, tags: List<AtkTag> = AtkTags.DEFAULT) {
   Row(Modifier.fillMaxWidth().height(56.dp).background(Color(0xFF0E0E0E))) {
-    names.forEachIndexed { i, name ->
+    tags.forEachIndexed { i, tag ->
       val on = i == selected
       Box(
         Modifier
@@ -504,15 +575,47 @@ fun AtkTabBar(selected: Int, onSelect: (Int) -> Unit) {
         contentAlignment = Alignment.Center,
       ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-          Text(icons[i], fontSize = 18.sp, color = if (on) Color.White else Color(0xFFBDBDBD))
+          Text(tag.icon, fontSize = 18.sp, color = if (on) Color.White else Color(0xFFBDBDBD))
           Spacer(Modifier.height(2.dp))
           Text(
-            name,
+            tag.name,
             fontSize = 13.sp,
             color = if (on) Color.White else Color(0xFFC8C8C8),
             fontWeight = if (on) FontWeight.Bold else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
           )
         }
+      }
+    }
+  }
+}
+
+/**
+ * 管理标签 long-press menu: plain white panel, black left-aligned entries with hairline
+ * dividers (the original AddinTimer look, see 管理标签.png). Kept separate from the dark
+ * [AtkContextMenu] used on the task list.
+ */
+@Composable
+fun AtkLightContextMenu(
+  entries: List<String>,
+  onPick: (Int) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  Dialog(onDismissRequest = onDismiss) {
+    Column(Modifier.fillMaxWidth(0.78f).background(Color.White)) {
+      entries.forEachIndexed { index, entry ->
+        Box(
+          Modifier
+            .fillMaxWidth()
+            .heightIn(min = 58.dp)
+            .clickable { onPick(index) }
+            .padding(horizontal = 22.dp, vertical = 8.dp),
+          contentAlignment = Alignment.CenterStart,
+        ) {
+          Text(entry, color = Color.Black, fontSize = 19.sp)
+        }
+        if (index != entries.lastIndex) AtkLightDivider()
       }
     }
   }
@@ -546,25 +649,33 @@ fun AtkContextMenu(entries: List<String>, onPick: (Int) -> Unit, onDismiss: () -
   }
 }
 
-/** System menu: light 2x4 grid sliding up from the bottom. */
+/**
+ * System menu: light 2x4 grid. The whole overlay is inset above the system navigation bar;
+ * without navigationBarsPadding the second row of labels lands underneath the 3-button bar.
+ */
 @Composable
 fun AtkSystemMenu(onPick: (Int) -> Unit, onDismiss: () -> Unit) {
   val names = listOf(
     "新增任务", "系统设置", "管理标签", "备份恢复",
     "分享好友", "检查更新", "建议反馈", "关于软件",
   )
+  // Use the app's own vectors: framework drawables are not guaranteed on every OEM ROM.
   val icons = listOf(
-    android.R.drawable.ic_menu_add,
-    android.R.drawable.ic_menu_manage,
-    android.R.drawable.ic_menu_agenda,
-    android.R.drawable.ic_menu_save,
-    android.R.drawable.ic_menu_share,
-    android.R.drawable.ic_menu_revert,
-    android.R.drawable.ic_menu_edit,
-    android.R.drawable.ic_menu_info_details,
+    com.lentikr.reminder.R.drawable.ic_add,
+    com.lentikr.reminder.R.drawable.ic_settings,
+    com.lentikr.reminder.R.drawable.ic_calendar_month,
+    com.lentikr.reminder.R.drawable.ic_restore_page,
+    com.lentikr.reminder.R.drawable.ic_share,
+    com.lentikr.reminder.R.drawable.ic_event_repeat,
+    com.lentikr.reminder.R.drawable.ic_edit,
+    com.lentikr.reminder.R.drawable.ic_info,
   )
   Box(
-    Modifier.fillMaxSize().background(Color(0x99000000)).clickable(onClick = onDismiss),
+    Modifier
+      .fillMaxSize()
+      .background(Color(0x99000000))
+      .clickable(onClick = onDismiss)
+      .navigationBarsPadding(),
     contentAlignment = Alignment.BottomCenter,
   ) {
     Column(
@@ -572,14 +683,14 @@ fun AtkSystemMenu(onPick: (Int) -> Unit, onDismiss: () -> Unit) {
         .fillMaxWidth()
         .background(Color(0xFFF0F0F0))
         .clickable(enabled = false, onClick = {})
-        .padding(vertical = 10.dp),
+        .padding(top = 10.dp, bottom = 14.dp),
     ) {
       for (row in 0..1) {
-        Row(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
           for (col in 0..3) {
             val i = row * 4 + col
             Column(
-              Modifier.weight(1f).height(80.dp).clickable { onPick(i) },
+              Modifier.weight(1f).height(74.dp).clickable { onPick(i) },
               horizontalAlignment = Alignment.CenterHorizontally,
               verticalArrangement = Arrangement.Center,
             ) {
@@ -587,10 +698,10 @@ fun AtkSystemMenu(onPick: (Int) -> Unit, onDismiss: () -> Unit) {
                 painter = painterResource(icons[i]),
                 contentDescription = names[i],
                 colorFilter = ColorFilter.tint(Color(0xFF777777)),
-                modifier = Modifier.size(32.dp),
+                modifier = Modifier.size(30.dp),
               )
-              Spacer(Modifier.height(6.dp))
-              Text(names[i], color = Color(0xFF222222), fontSize = 13.sp)
+              Spacer(Modifier.height(4.dp))
+              Text(names[i], color = Color(0xFF222222), fontSize = 13.sp, maxLines = 1)
             }
           }
         }
@@ -643,17 +754,23 @@ fun AtkNewTaskDialog(onPick: (Int) -> Unit, onDismiss: () -> Unit) {
   }
 }
 
-/** A settings row: big title, blue current value, chevron. */
+/**
+ * A settings row: big title, blue current value, chevron.
+ *
+ * 3.1.0: the row used a hard 66.dp height, which clipped the second line of a longer value
+ * (「触发日志」的「最近 200 条：触发 / 前台服务 / 播铃 / 执行界面」被裁掉半行). Let the row
+ * grow with its content instead.
+ */
 @Composable
 fun AtkSettingRow(title: String, value: String, onClick: () -> Unit) {
   Column {
     Row(
       Modifier
         .fillMaxWidth()
-        .height(66.dp)
+        .heightIn(min = 66.dp)
         .background(AtkSkin.bgDeep)
         .clickable(onClick = onClick)
-        .padding(horizontal = 12.dp),
+        .padding(horizontal = 12.dp, vertical = 10.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
       Column(Modifier.weight(1f)) {
@@ -665,4 +782,35 @@ fun AtkSettingRow(title: String, value: String, onClick: () -> Unit) {
     }
     Box(Modifier.fillMaxWidth().height(1.dp).background(AtkSkin.divider))
   }
+}
+
+/**
+ * A settings row with a pill toggle on the right (the 调试 switch in 权限自检).
+ * Tapping anywhere on the row flips the switch.
+ */
+@Composable
+fun AtkSwitchRow(title: String, checked: Boolean, onToggle: (Boolean) -> Unit) {
+  Row(
+    Modifier
+      .fillMaxWidth()
+      .heightIn(min = 66.dp)
+      .background(AtkSkin.bgDeep)
+      .clickable { onToggle(!checked) }
+      .padding(horizontal = 12.dp, vertical = 10.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Text(title, color = Color.White, fontSize = 19.sp, modifier = Modifier.weight(1f))
+    Box(
+      Modifier
+        .width(52.dp)
+        .height(30.dp)
+        .clip(RoundedCornerShape(15.dp))
+        .background(if (checked) AtkSkin.green else Color(0xFF6A6A6A))
+        .padding(3.dp),
+      contentAlignment = if (checked) Alignment.CenterEnd else Alignment.CenterStart,
+    ) {
+      Box(Modifier.size(24.dp).background(Color.White, CircleShape))
+    }
+  }
+  Box(Modifier.fillMaxWidth().height(1.dp).background(AtkSkin.divider))
 }
