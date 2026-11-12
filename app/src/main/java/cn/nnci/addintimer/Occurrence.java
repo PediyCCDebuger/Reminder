@@ -48,13 +48,21 @@ public final class Occurrence {
                     return has(r.nthWeek, nth) || (isLast && has(r.nthWeek, 4));
                 }
                 if (has(r.monthDays, d.getDayOfMonth() - 1)) return true;
-                // 原版行为：选中"31号"时，小月自动落在月末
-                return has(r.monthDays, 30) && d.getDayOfMonth() == d.lengthOfMonth();
+                // 原版行为：选中"31号"(索引30)时，小月自动落在月末；新增"最后一天"(索引31)也落在月末
+                if (d.getDayOfMonth() == d.lengthOfMonth()
+                        && (has(r.monthDays, 30) || has(r.monthDays, 31))) return true;
+                return false;
             }
             case Rule.MODE_LUNAR: {
-                if (d.getYear() < Lunar.MIN_YEAR || d.getYear() > Lunar.MAX_YEAR) return false;
-                LocalDate solar = Lunar.toSolar(d.getYear(), r.lunarMonth, r.lunarDay, r.lunarLeap == 1);
-                return d.equals(solar);
+                // 3.6.8：改用公历反算农历（fromSolar），避免旧实现把农历年等同于公历年、
+                // 导致农历 11/12 月（公历落在次年）永远不匹配、永不触发。
+                int[] ld = Lunar.fromSolar(d);
+                if (ld == null) return false;
+                if (ld[0] < Lunar.MIN_YEAR || ld[0] > Lunar.MAX_YEAR) return false;
+                if (ld[1] != r.lunarMonth) return false;
+                if (ld[2] != r.lunarDay) return false;
+                if ((ld[3] == 1) != (r.lunarLeap == 1)) return false;
+                return true;
             }
             case Rule.MODE_TARGET:
                 return d.getYear() == r.ey && d.getMonthValue() == r.em && d.getDayOfMonth() == r.ed;

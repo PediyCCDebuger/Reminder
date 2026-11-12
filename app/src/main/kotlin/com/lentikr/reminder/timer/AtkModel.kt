@@ -20,7 +20,7 @@ object AtkOptions {
   val MONTHS = listOf("一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "十二月")
   val MONTH_DAYS = (1..31).map { it.toString() } + "最后一天"
   val MONTH_WEEKS = listOf("第一个", "第二个", "第三个", "第四个", "最后一个")
-  val MONTH_TYPE = listOf("按天计算", "指周计算")
+  val MONTH_TYPE = listOf("按天计算", "按周计算")
   val LUNAR_MONTHS = listOf("正月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "冬月", "腊月")
   val LUNAR_DAYS = listOf(
     "初一", "初二", "初三", "初四", "初五", "初六", "初七", "初八", "初九", "初十",

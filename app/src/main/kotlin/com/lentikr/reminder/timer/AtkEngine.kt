@@ -321,6 +321,27 @@ class AtkEngine(private val context: Context) {
     AtkDiag.log(context, "贪睡: 已挂 ${m} 分钟后重响 id=$id")
   }
 
+  /**
+   * 3.6.8：取消挂起的「贪睡」重响闹钟（ATK_SNOOZE_FIRE）。用于暂停 / 关闭任务时清掉遗留的贪睡，
+   * 避免此前挂起的贪睡到点仍会自动重响。PendingIntent 参数必须与 [armSnooze] 完全一致才能取消。
+   */
+  fun cancelSnooze(id: Long) {
+    try {
+      val pi = PendingIntent.getBroadcast(
+        context, (id * 7 + 6).toInt(),
+        Intent(context, AtkReceiver::class.java).apply {
+          this.action = "app.lentikr.reminder.ATK_SNOOZE_FIRE"
+          putExtra(EXTRA_ID, id)
+        },
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+      )
+      alarms.cancel(pi)
+      AtkDiag.log(context, "贪睡: 已取消挂起的重响 id=$id")
+    } catch (e: Exception) {
+      AtkDiag.log(context, "贪睡: 取消重响失败 id=$id ${e.message}")
+    }
+  }
+
   /** 解析任务「预设时间」为分钟数（act[13] 存的是 SNAP_DUR 选项索引）。 */
   fun snoozeMinutes(item: AtkItem): Int {
     val idx = AtkItem.intOf(item.actValue(13)).coerceIn(0, AtkOptions.SNAP_DUR.lastIndex)
@@ -778,6 +799,8 @@ class AtkEngine(private val context: Context) {
   fun dismiss(id: Long) {
     try { notifications.cancel(id.toInt()) } catch (e: Exception) { }
     cancelAlarmNotification(id)
+    // 3.6.8：清除挂起的贪睡重响闹钟，使暂停 / 关闭后不会到点又自动响。
+    cancelSnooze(id)
   }
 
   /** Whether Android still lets this app launch a full-screen Activity over the keyguard. */

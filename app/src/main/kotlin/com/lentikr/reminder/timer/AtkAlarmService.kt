@@ -210,8 +210,9 @@ class AtkAlarmService : Service() {
           val remain = left - 1
           autoSnoozeLeft[id] = remain
           AtkAlarmSound.stop()
-          AtkEngine(this@AtkAlarmService).armSnooze(id, snapDurMin)
+          // 3.6.8：先停服务（dismiss 会取消挂起的贪睡闹钟），再挂本次自动贪睡，避免被 dismiss 取消。
           stopEverything(startIdForSnooze())
+          AtkEngine(this@AtkAlarmService).armSnooze(id, snapDurMin)
         }
       }
     }
@@ -248,9 +249,10 @@ class AtkAlarmService : Service() {
           unregisterPowerReceiver()
           if (powerStyle == 1) {
             // 自动贪睡：停止响铃并按参数里的贪睡时长挂重响。
+            // 3.6.8：先停服务（dismiss 会取消挂起的贪睡闹钟），再挂本次贪睡，避免被 dismiss 取消。
             AtkAlarmSound.stop()
-            AtkEngine(this@AtkAlarmService).armSnooze(id, snapDurMin)
             stopEverything(startIdForSnooze())
+            AtkEngine(this@AtkAlarmService).armSnooze(id, snapDurMin)
           } else {
             // 暂停提醒：停止响铃，保留该闹钟的后续排程（含自动贪睡），不 dismiss。
             AtkAlarmSound.stop()
@@ -402,7 +404,9 @@ class AtkAlarmService : Service() {
       val sensor = sm.getDefaultSensor(Sensor.TYPE_GRAVITY)
         ?: sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: return
       sensorManager = sm
-      var armed = true
+      // 3.6.8：初始 armed=false，只有先读到「屏幕朝上(z>7)」才置 true。否则重响时手机若仍翻转
+      // (z<-7)，onSensorChanged 会立刻再次触发翻转贪睡 → 闹钟刚响一声就被静音/停止。
+      var armed = false
       gravityListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
           val z = event.values[2]

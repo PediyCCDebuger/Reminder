@@ -39,6 +39,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -934,7 +935,17 @@ private fun SettingsScreen(
   var clearLogsConfirm by remember { mutableStateOf(false) }
   @Suppress("UNUSED_VARIABLE") val observeVersion = version
 
-  fun valueOf(def: SettingDef): String = prefs.getString(def.key, def.default) ?: def.default
+  // 3.6.8：把各设置当前值提升为状态表，选择后立即反映到列表行，避免 LazyColumn 复用缓存 +
+  // SharedPreferences.apply() 异步写入导致返回再进才刷新的问题。
+  val values = remember {
+    mutableStateMapOf<String, String>().apply {
+      for (def in GENERAL_SETTINGS + TIMER_SETTINGS + WAIT_SETTINGS + OTHER_SETTINGS) {
+        put(def.key, prefs.getString(def.key, def.default) ?: def.default)
+      }
+    }
+  }
+
+  fun valueOf(def: SettingDef): String = values[def.key] ?: def.default
 
   Column(Modifier.fillMaxSize()) {
     AtkTitleBar("系统设置", onBack = onBack)
@@ -947,8 +958,8 @@ private fun SettingsScreen(
         item {
           AtkSettingRow(def.title, valueOf(def)) {
             choice = SettingChoice(def, valueOf(def)) { v ->
+              values[def.key] = v
               prefs.edit().putString(def.key, v).apply()
-              version++
             }
           }
         }
@@ -962,8 +973,8 @@ private fun SettingsScreen(
         item {
           AtkSettingRow(def.title, valueOf(def)) {
             choice = SettingChoice(def, valueOf(def)) { v ->
+              values[def.key] = v
               prefs.edit().putString(def.key, v).apply()
-              version++
             }
           }
         }
@@ -973,8 +984,8 @@ private fun SettingsScreen(
         item {
           AtkSettingRow(def.title, valueOf(def)) {
             choice = SettingChoice(def, valueOf(def)) { v ->
+              values[def.key] = v
               prefs.edit().putString(def.key, v).apply()
-              version++
             }
           }
         }
@@ -984,8 +995,8 @@ private fun SettingsScreen(
         item {
           AtkSettingRow(def.title, valueOf(def)) {
             choice = SettingChoice(def, valueOf(def)) { v ->
+              values[def.key] = v
               prefs.edit().putString(def.key, v).apply()
-              version++
             }
           }
         }
