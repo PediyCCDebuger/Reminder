@@ -201,8 +201,8 @@ class AtkAlarmService : Service() {
     val left = autoSnoozeLeft[id] ?: return
     if (left <= 0) return
     cancelAutoSnooze()
-    autoSnoozeHandler = Handler(Looper.getMainLooper())
-    autoSnoozeTask = object : Runnable {
+    val handler = Handler(Looper.getMainLooper())
+    val task = object : Runnable {
       override fun run() {
         // 仅当本闹钟仍在响铃（未被关闭）时才自动贪睡。
         if (currentId == id && AtkAlarmSound.isPlaying()) {
@@ -215,7 +215,9 @@ class AtkAlarmService : Service() {
         }
       }
     }
-    autoSnoozeHandler?.postDelayed(autoSnoozeTask, snapDurMin * 60L * 1000L)
+    autoSnoozeHandler = handler
+    autoSnoozeTask = task
+    handler.postDelayed(task, snapDurMin * 60L * 1000L)
     AtkDiag.log(this, "svc: 自动贪睡已挂 ${snapDurMin} 分钟 id=$id 剩余=$left")
   }
 
