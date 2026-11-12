@@ -112,6 +112,7 @@ object AtkAlarmSound {
   private var maxAlarmVolume = 1
   private var streamRampActive = false
   private var streamRampTask: Runnable? = null
+  private var streamHandler: Handler? = null
 
   fun isPlaying(): Boolean = active
 
@@ -180,6 +181,9 @@ object AtkAlarmSound {
     maxAlarmVolume = try { am?.getStreamMaxVolume(AudioManager.STREAM_ALARM) ?: 1 } catch (e: Exception) { 1 }
     val targetStream = if (originalAlarmVolume > 0) originalAlarmVolume else maxAlarmVolume
     val startStream = (targetStream * 0.15f).toInt().coerceAtLeast(1)
+    // 先清掉上一次可能仍在跑的渐强（此前 handler 字段为空导致无法取消，会出现两次渐强叠加、
+    // 音量跳动或提前到顶），再开始本次渐强。
+    streamRampTask?.let { streamHandler?.removeCallbacks(it) }
     streamRampActive = rampSeconds > 0 && am != null
     if (streamRampActive) rampStream(startStream, targetStream, rampSeconds)
 
@@ -301,19 +305,24 @@ object AtkAlarmSound {
   }
 
   /**
-   * 3.6.5：渐强核心——逐秒抬升系统「闹钟」流音量，从 startIdx 渐变到 targetIdx。
+   * 3.6.5：渐强核心——逐秒抬升系统「闹钟」流音量，从 startIdx 渐变到 targetIdx，恰好用时 seconds 秒。
    * 这是跨 ROM 真正可闻的渐强（MediaPlayer/Ringtone.setVolume 在不少机型被忽略）。
    * 播放器/铃声本身保持用户在「音量大小」里设定的相对音量，音量起伏完全由该 envelope 控制。
+   * 采用 smoothstep 缓入曲线：前段更轻、末段才到顶，避免「一上来就很大声 / 很快到最大音量」的观感，
+   * 同时保证在设置的时长内（如 10 秒）才真正到达目标音量。
    */
   private fun rampStream(startIdx: Int, targetIdx: Int, seconds: Int) {
     val am = audioManager ?: return
     val h = Handler(Looper.getMainLooper())
+    streamHandler = h
     var step = 0
     val task = object : Runnable {
       override fun run() {
         step++
-        val v = (startIdx + (targetIdx - startIdx) * step.toFloat() / seconds).toInt()
-          .coerceIn(0, maxAlarmVolume)
+        // smoothstep：f(0)=0, f(1)=1，起步平缓、末段加速，全程正好 seconds 秒。
+        val t = (step.toFloat() / seconds).coerceIn(0f, 1f)
+        val f = t * t * (3f - 2f * t)
+        val v = (startIdx + (targetIdx - startIdx) * f).toInt().coerceIn(0, maxAlarmVolume)
         try { am.setStreamVolume(AudioManager.STREAM_ALARM, v, 0) } catch (e: Exception) { }
         if (step < seconds) h.postDelayed(this, 1000L) else streamRampActive = false
       }
@@ -371,8 +380,9 @@ object AtkAlarmSound {
     }
     rampTask = null
     handler = null
-    try { streamRampTask?.let { handler?.removeCallbacks(it) } } catch (e: Exception) { }
+    try { streamRampTask?.let { streamHandler?.removeCallbacks(it) } } catch (e: Exception) { }
     streamRampTask = null
+    streamHandler = null
     restoreStreamVolume()
     try {
       mediaSession?.release()
@@ -503,6 +513,9 @@ class AtkReceiver : BroadcastReceiver() {
         AtkAlarmSound.stop()
         stopAlarmService(context)
         engine.dismiss(id)
+        // item 在本分支作用域内需自行取出，用于读取「预设时间」作为重响间隔。
+        val item = if (id >= 0) store.get(id) else null
+        val minutes = if (item != null) engine.snoozeMinutes(item) else 10
         val alarms = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val pi = PendingIntent.getBroadcast(
           context, (id * 7 + 6).toInt(),
@@ -512,7 +525,7 @@ class AtkReceiver : BroadcastReceiver() {
           },
           PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val at = System.currentTimeMillis() + 10 * 60 * 1000L
+        val at = System.currentTimeMillis() + minutes * 60 * 1000L
         // 3.6.5：贪睡重响改回 setAlarmClock（与真实排程一致），保证深睡 / Doze 下也能准时唤醒，
         // 避免此前 setExactAndAllowWhileIdle 被延后投递导致「贪睡后再也不响」。
         val aci = AlarmManager.AlarmClockInfo(at, pi)

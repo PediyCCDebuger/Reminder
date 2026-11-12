@@ -105,6 +105,8 @@ fun TimerApp() {
     var selectedIds by remember { mutableStateOf(emptySet<Long>()) }
     var batchMoveOpen by remember { mutableStateOf(false) }
     var batchDeleteOpen by remember { mutableStateOf(false) }
+    // 3.6.7：检查到更新后先弹确认框，确定才下载（不直接下载）。
+    var updateInfo by remember { mutableStateOf<AtkUpdater.ReleaseInfo?>(null) }
 
     fun refresh() {
       val raw = try { store.all() } catch (e: Exception) { emptyList<AtkItem>() }
@@ -230,6 +232,22 @@ fun TimerApp() {
       createExport.launch(name)
     }
 
+    /** 3.6.7：用户确认后下载并安装更新；代理取自系统设置「更新下载代理」。 */
+    fun updateDownload(info: AtkUpdater.ReleaseInfo) {
+      val proxy = prefs.getString("update_proxy", "直连（不使用代理）")
+        ?: "直连（不使用代理）"
+      menuScope.launch {
+        toast(context, "发现新版本 ${info.tag}，开始下载…")
+        val file = try { AtkUpdater.download(context, info, proxy) } catch (e: Exception) { null }
+        if (file == null) {
+          toast(context, "下载失败：代理可能不可用，请更换更新下载代理")
+        } else {
+          toast(context, "下载完成，正在打开安装…")
+          AtkUpdater.install(context, file)
+        }
+      }
+    }
+
     Column(
       Modifier
         .fillMaxSize()
@@ -330,9 +348,8 @@ fun TimerApp() {
               try { context.startActivity(Intent.createChooser(send, "分享好友")) } catch (e: Exception) { }
             }
             5 -> {
-              // 3.6.5：实际检查 / 下载 / 安装。下载代理取自系统设置的「下载代理」。
-              val proxy = prefs.getString("update_proxy", "直连（不使用代理）")
-                ?: "直连（不使用代理）"
+              // 3.6.5：实际检查更新。3.6.7 起：检测到新版本不再直接下载，改为弹出确认框，
+              // 确定才下载安装，取消则不下载。下载代理取自系统设置的「更新下载代理」。
               menuScope.launch {
                 toast(context, "正在检查更新…")
                 val info = try { AtkUpdater.fetchLatest() } catch (e: Exception) { null }
@@ -345,14 +362,7 @@ fun TimerApp() {
                   toast(context, "已是最新版本（$current）")
                   return@launch
                 }
-                toast(context, "发现新版本 ${info.tag}，开始下载…")
-                val file = try { AtkUpdater.download(context, info, proxy) } catch (e: Exception) { null }
-                if (file == null) {
-                  toast(context, "下载失败：代理可能不可用，请更换更新下载代理")
-                } else {
-                  toast(context, "下载完成，正在打开安装…")
-                  AtkUpdater.install(context, file)
-                }
+                updateInfo = info
               }
             }
             6 -> {
@@ -401,6 +411,18 @@ fun TimerApp() {
           }
         },
         onDismiss = { backupOpen = false },
+      )
+    }
+
+    // 3.6.7：检查到更新后弹出确认框，确定才下载，取消则不下载。
+    updateInfo?.let { info ->
+      AtkMessageDialog(
+        title = "发现新版本",
+        body = "发现新版本 ${info.tag}，是否下载更新？",
+        confirmText = "下载",
+        dismissText = "取消",
+        onConfirm = { val i = info; updateInfo = null; updateDownload(i) },
+        onDismiss = { updateInfo = null },
       )
     }
 

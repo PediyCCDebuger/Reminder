@@ -175,7 +175,7 @@ class AtkAlarmService : Service() {
     val snapRepeat = AtkItem.intOf(item.actValue(14)).coerceIn(0, 10) // 0 = 无，N = N 次
     val snapIdx = AtkItem.intOf(item.actValue(13)).coerceIn(0, AtkOptions.SNAP_DUR.lastIndex)
     snapDurMin = snapMinutes(AtkOptions.SNAP_DUR[snapIdx]) // 预设时间（存的是选项索引）
-    if (powerStyle != -1) registerPowerReceiver(powerStyle, id)
+    if (powerStyle != -1) registerPowerReceiver(powerStyle, id, lightScreen)
     if (snapRepeat > 0) {
       // 真正触发（fromSnooze=false）时重置自动贪睡次数，开启新一轮；贪睡重响（fromSnooze=true）
       // 时保留已递减的次数，避免无限贪睡或次日失效。
@@ -210,7 +210,7 @@ class AtkAlarmService : Service() {
           val remain = left - 1
           autoSnoozeLeft[id] = remain
           AtkAlarmSound.stop()
-          AtkEngine(this@AtkAlarmService).armSnooze(id)
+          AtkEngine(this@AtkAlarmService).armSnooze(id, snapDurMin)
           stopEverything(startIdForSnooze())
         }
       }
@@ -228,19 +228,28 @@ class AtkAlarmService : Service() {
   }
 
   /**
-   * 3.6.5：电源键按下监听。用 ACTION_SCREEN_OFF 作为电源键代理（按电源键会熄灭屏幕），
-   * 在响铃中按下电源键按 act[25] 处理：暂停提醒=停止响铃并保留排程；自动贪睡=贪睡一次。
+   * 3.6.5：电源键按下监听。以「屏幕状态变化」作为电源键代理：
+   * - 点亮屏幕模式（lightScreen=true）：闹钟已点亮屏幕，用户按电源键灭屏（SCREEN_OFF）即触发。
+   * - 不点亮屏幕模式（lightScreen=false）：屏幕初始为灭，用户按电源键点亮（SCREEN_ON）即为首次
+   *   交互；同时兼容「亮屏时触发」的边界，两种事件都监听，首个触发即处理。
+   *   此前只监听 SCREEN_OFF，导致「不点亮屏幕」时第一次按电源键（亮屏）不触发，要再按一次灭屏才停，
+   *   即用户反馈的「要按两次才停止 / 第一次没暂停」。
+   * 按 act[25] 处理：暂停提醒=停止响铃并保留排程；自动贪睡=贪睡一次（用参数里的贪睡时长）。
    */
-  private fun registerPowerReceiver(powerStyle: Int, id: Long) {
+  private fun registerPowerReceiver(powerStyle: Int, id: Long, lightScreen: Boolean) {
     powerReceiver = object : BroadcastReceiver() {
       override fun onReceive(c: Context?, intent: Intent?) {
-        if (intent?.action == Intent.ACTION_SCREEN_OFF && currentId == id) {
-          AtkDiag.log(this@AtkAlarmService, "svc: 电源键按下（灭屏）powerStyle=$powerStyle id=$id")
+        val a = intent?.action ?: return
+        if ((a == "android.intent.action.SCREEN_OFF" || a == "android.intent.action.SCREEN_ON") && currentId == id) {
+          AtkDiag.log(
+            this@AtkAlarmService,
+            "svc: 电源键事件（${if (a == "android.intent.action.SCREEN_OFF") "灭屏" else "亮屏"}）powerStyle=$powerStyle id=$id",
+          )
           unregisterPowerReceiver()
           if (powerStyle == 1) {
-            // 自动贪睡：停止响铃并挂 10 分钟重响。
+            // 自动贪睡：停止响铃并按参数里的贪睡时长挂重响。
             AtkAlarmSound.stop()
-            AtkEngine(this@AtkAlarmService).armSnooze(id)
+            AtkEngine(this@AtkAlarmService).armSnooze(id, snapDurMin)
             stopEverything(startIdForSnooze())
           } else {
             // 暂停提醒：停止响铃，保留该闹钟的后续排程（含自动贪睡），不 dismiss。
@@ -253,8 +262,18 @@ class AtkAlarmService : Service() {
       }
     }
     try {
-      registerReceiver(powerReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
-      AtkDiag.log(this, "svc: 电源键监听已注册 id=$id")
+      val filter = IntentFilter()
+      if (lightScreen) {
+        // 已点亮屏幕：只听灭屏（用户主动按电源键灭屏 = 暂停）。
+        filter.addAction("android.intent.action.SCREEN_OFF")
+      } else {
+        // 不点亮屏幕：初始为灭，用户按电源键点亮（SCREEN_ON）即首次交互；
+        // 也兼容亮屏时触发的边界，两种事件都听，首个触发即处理。
+        filter.addAction("android.intent.action.SCREEN_ON")
+        filter.addAction("android.intent.action.SCREEN_OFF")
+      }
+      registerReceiver(powerReceiver, filter)
+      AtkDiag.log(this, "svc: 电源键监听已注册 id=$id lightScreen=$lightScreen")
     } catch (e: Exception) {
       AtkDiag.log(this, "svc: 电源键监听注册失败 ${e.message}")
     }
@@ -413,9 +432,10 @@ class AtkAlarmService : Service() {
     AtkDiag.log(this, "svc: 翻转贪睡 id=$id")
     unregisterFlipSensor()
     AtkAlarmSound.stop()
-    // 3.6.5：直接挂 10 分钟贪睡重响（engine.armSnooze），并停止本前台服务。
-    // 此前经 ACTION_SNOOZE 广播绕一圈再停服务，时序不确定，导致贪睡重响丢失、闹钟不再响。
-    AtkEngine(this).armSnooze(id)
+    // 3.6.5：直接挂「参数里设置的贪睡时长」重响（engine.armSnooze(minutes)），并停止本前台服务。
+    // 此前写死 10 分钟，与用户在「预设时间」里设的贪睡时长（如 3 分钟）不符；且经 ACTION_SNOOZE
+    // 广播绕一圈再停服务时序不确定，导致贪睡重响丢失、闹钟不再响。
+    AtkEngine(this).armSnooze(id, snapDurMin)
     stopSelf()
   }
 

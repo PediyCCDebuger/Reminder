@@ -292,11 +292,13 @@ class AtkEngine(private val context: Context) {
   }
 
   /**
-   * 3.6.5：挂「贪睡」重响。10 分钟后以 ATK_SNOOZE_FIRE 广播重新触发（setAlarmClock，保证深睡/
+   * 3.6.5：挂「贪睡」重响。minutes 分钟后以 ATK_SNOOZE_FIRE 广播重新触发（setAlarmClock，保证深睡/
    * Doze 下也能准时唤醒，避免此前 setExactAndAllowWhileIdle 被延后导致「贪睡后再也不响」）。
-   * 仅负责挂钟，不停止前台服务、不 dismiss。
+   * minutes 取任务的「预设时间」(act[13])，使翻转贪睡 / 自动贪睡 / 贪睡按钮都遵循用户在参数里设置的
+   * 贪睡时长，而不是写死的 10 分钟。仅负责挂钟，不停止前台服务、不 dismiss。
    */
-  fun armSnooze(id: Long) {
+  fun armSnooze(id: Long, minutes: Int) {
+    val m = minutes.coerceIn(1, 60)
     val pi = PendingIntent.getBroadcast(
       context, (id * 7 + 6).toInt(),
       Intent(context, AtkReceiver::class.java).apply {
@@ -305,7 +307,7 @@ class AtkEngine(private val context: Context) {
       },
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
-    val at = System.currentTimeMillis() + 10 * 60 * 1000L
+    val at = System.currentTimeMillis() + m * 60 * 1000L
     val aci = AlarmManager.AlarmClockInfo(at, pi)
     try {
       alarms.setAlarmClock(aci, pi)
@@ -316,7 +318,14 @@ class AtkEngine(private val context: Context) {
         alarms.set(AlarmManager.RTC_WAKEUP, at, pi)
       }
     }
-    AtkDiag.log(context, "贪睡: 已挂 10 分钟后重响 id=$id")
+    AtkDiag.log(context, "贪睡: 已挂 ${m} 分钟后重响 id=$id")
+  }
+
+  /** 解析任务「预设时间」为分钟数（act[13] 存的是 SNAP_DUR 选项索引）。 */
+  fun snoozeMinutes(item: AtkItem): Int {
+    val idx = AtkItem.intOf(item.actValue(13)).coerceIn(0, AtkOptions.SNAP_DUR.lastIndex)
+    val n = AtkOptions.SNAP_DUR[idx].filter { it.isDigit() }.toIntOrNull() ?: 10
+    return n.coerceIn(1, 60)
   }
 
   /** Next fire time in epoch millis, or 0 when the rule yields nothing. Never throws. */
