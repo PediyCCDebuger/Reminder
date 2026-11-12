@@ -7,6 +7,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
+import android.media.AudioManager
 import android.media.MediaPlayer
 import android.media.Ringtone
 import android.media.RingtoneManager
@@ -105,6 +106,12 @@ object AtkAlarmSound {
   // is "misused" (no session). That kill took the ringtone down with it, which is exactly the
   // "锁屏 / 退到后台就听不到闹钟" symptom.
   private var mediaSession: MediaSession? = null
+  // 3.6.5：渐强改为渐变「闹钟」系统流音量（跨 ROM 可闻）。保存原音量以便停止时恢复。
+  private var audioManager: AudioManager? = null
+  private var originalAlarmVolume = -1
+  private var maxAlarmVolume = 1
+  private var streamRampActive = false
+  private var streamRampTask: Runnable? = null
 
   fun isPlaying(): Boolean = active
 
@@ -162,19 +169,28 @@ object AtkAlarmSound {
     // 渐响模式 (act[10]): 0 = 立即; n = 渐响 n*10 秒.
     val rampMode = item?.let { AtkItem.intOf(it.actValue(10)) } ?: 0
     val rampSeconds = (rampMode * 10).coerceIn(0, 90)
-    // 3.6.5：回退到 3.6.1 的有效渐响手感——起始音量稍大（约满音的 12%），随后平滑渐强到满音。
-    // 此前（3.6.2+）起始仅 5% 且 Ringtone 回退路径完全不渐响，实际表现成「一上来就是最大声」。
-    val startVol = if (rampSeconds > 0) (maxVol * 0.12f).coerceAtLeast(0.04f) else maxVol
+
+    // 3.6.5：渐强改用 AudioManager 渐变系统「闹钟」流音量——这是跨 ROM 真正可闻的渐强方式。
+    // 部分机型 MediaPlayer / Ringtone 的 setVolume 被忽略，导致此前「一上来最大声」或「一直比较小、
+    // 根本不渐强」。播放器/铃声仅按用户设定的相对音量(maxVol)出声，音量大小由闹钟流音量 envelope
+    // 控制：从约 15% 渐变到用户当前的闹钟音量；停止时恢复原音量。
+    val am = app.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    audioManager = am
+    originalAlarmVolume = try { am?.getStreamVolume(AudioManager.STREAM_ALARM) ?: -1 } catch (e: Exception) { -1 }
+    maxAlarmVolume = try { am?.getStreamMaxVolume(AudioManager.STREAM_ALARM) ?: 1 } catch (e: Exception) { 1 }
+    val targetStream = if (originalAlarmVolume > 0) originalAlarmVolume else maxAlarmVolume
+    val startStream = (targetStream * 0.15f).toInt().coerceAtLeast(1)
+    streamRampActive = rampSeconds > 0 && am != null
+    if (streamRampActive) rampStream(startStream, targetStream, rampSeconds)
 
     // 3.6.5：实际起播逻辑封装为 lambda，便于在「执行等待倒计时」下延迟执行。
     val beginTone: () -> Unit = {
       if (uri == null) {
         AtkDiag.log(app, "音: act[7]=「无」，只振动")
-      } else if (startPlayer(app, uri, startVol)) {
-        AtkDiag.log(app, "音: MediaPlayer 起播 目标音量=${(maxVol * 100).toInt()}% 渐响=${rampSeconds}s")
-        if (rampSeconds > 0) scheduleRamp(startVol, maxVol, rampSeconds)
-      } else if (startRingtone(app, uri, startVol)) {
-        AtkDiag.log(app, "音: MediaPlayer 失败，回退 Ringtone 渐响（起始=${(startVol * 100).toInt()}%）")
+      } else if (startPlayer(app, uri, maxVol)) {
+        AtkDiag.log(app, "音: MediaPlayer 起播 相对音量=${(maxVol * 100).toInt()}% 渐响(闹钟流)=$rampSeconds s")
+      } else if (startRingtone(app, uri, maxVol)) {
+        AtkDiag.log(app, "音: MediaPlayer 失败，回退 Ringtone 相对音量=${(maxVol * 100).toInt()}%")
       } else {
         AtkDiag.log(app, "音: 无法播放 $uri")
       }
@@ -284,26 +300,36 @@ object AtkAlarmSound {
     false
   }
 
-  /** Raise MediaPlayer's own volume 1% per tick so 渐响 really starts quiet. */
-  private fun scheduleRamp(from: Float, to: Float, seconds: Int) {
+  /**
+   * 3.6.5：渐强核心——逐秒抬升系统「闹钟」流音量，从 startIdx 渐变到 targetIdx。
+   * 这是跨 ROM 真正可闻的渐强（MediaPlayer/Ringtone.setVolume 在不少机型被忽略）。
+   * 播放器/铃声本身保持用户在「音量大小」里设定的相对音量，音量起伏完全由该 envelope 控制。
+   */
+  private fun rampStream(startIdx: Int, targetIdx: Int, seconds: Int) {
+    val am = audioManager ?: return
     val h = Handler(Looper.getMainLooper())
-    handler = h
     var step = 0
     val task = object : Runnable {
       override fun run() {
         step++
-        val ratio = step.toFloat() / seconds
-        val v = (from + (to - from) * ratio).coerceIn(0f, 1f)
-        try { player?.setVolume(v, v) } catch (e: Exception) { }
-        // 3.6.5：Ringtone 回退路径（API 28+）也同步渐响。
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-          try { ringtone?.setVolume(v) } catch (e: Exception) { }
-        }
-        if (step < seconds) h.postDelayed(this, 1000L)
+        val v = (startIdx + (targetIdx - startIdx) * step.toFloat() / seconds).toInt()
+          .coerceIn(0, maxAlarmVolume)
+        try { am.setStreamVolume(AudioManager.STREAM_ALARM, v, 0) } catch (e: Exception) { }
+        if (step < seconds) h.postDelayed(this, 1000L) else streamRampActive = false
       }
     }
-    rampTask = task
+    streamRampTask = task
+    try { am.setStreamVolume(AudioManager.STREAM_ALARM, startIdx, 0) } catch (e: Exception) { }
     h.postDelayed(task, 1000L)
+  }
+
+  /** 停止时把「闹钟」流音量恢复到用户原本的设置，避免污染其它闹钟。 */
+  private fun restoreStreamVolume() {
+    if (originalAlarmVolume > 0) {
+      try { audioManager?.setStreamVolume(AudioManager.STREAM_ALARM, originalAlarmVolume, 0) } catch (e: Exception) { }
+    }
+    originalAlarmVolume = -1
+    streamRampActive = false
   }
 
   /** 振动类型 (act[12]): 0 无振动 / 1 跟随音乐起停 / 2..4 音乐前振动 10..30 秒.
@@ -345,6 +371,9 @@ object AtkAlarmSound {
     }
     rampTask = null
     handler = null
+    try { streamRampTask?.let { handler?.removeCallbacks(it) } } catch (e: Exception) { }
+    streamRampTask = null
+    restoreStreamVolume()
     try {
       mediaSession?.release()
     } catch (e: Exception) {
@@ -429,7 +458,7 @@ class AtkReceiver : BroadcastReceiver() {
           // 2) Start the FGS; IT mounts the full-screen notification via startForeground()
           //    AND directly starts the 执行界面 (3.6.0: see AtkAlarmService). A foreground
           //    process launch is the only path ColorOS honours for turning the screen on.
-          startAlarmService(context, engine, id, force)
+          startAlarmService(context, engine, id, force, fromSnooze = false)
           AtkDiag.log(context, "全屏通知: 已交给前台服务挂载并直接拉起执行界面 id=$id")
           store.log(id, 1, item.name)
           engine.schedule(item)
@@ -463,7 +492,7 @@ class AtkReceiver : BroadcastReceiver() {
             delayMs = engine.globalWaitMs(),
             vibrateOverride = engine.globalVibrate(),
           )
-          startAlarmService(context, engine, id, false)
+          startAlarmService(context, engine, id, false, fromSnooze = true)
           AtkDiag.log(context, "全屏通知: 已交给前台服务挂载（贪睡）id=$id")
           store.log(id, 2, item.name + " 贪睡")
         }
@@ -513,11 +542,18 @@ class AtkReceiver : BroadcastReceiver() {
    * background app. If the FGS start itself is refused, the broadcast falls back to a direct
    * notify() + startActivity as a last resort.
    */
-  private fun startAlarmService(context: Context, engine: AtkEngine, id: Long, force: Boolean) {
+  private fun startAlarmService(
+    context: Context,
+    engine: AtkEngine,
+    id: Long,
+    force: Boolean,
+    fromSnooze: Boolean = false,
+  ) {
     val svc = Intent(context, AtkAlarmService::class.java).apply {
       putExtra(AtkAlarmService.EXTRA_ACTION, AtkAlarmService.ACTION_START)
       putExtra(AtkEngine.EXTRA_ID, id)
       putExtra(AtkAlarmService.EXTRA_FORCE, force)
+      putExtra(AtkAlarmService.EXTRA_FROM_SNOOZE, fromSnooze)
     }
     try {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -981,7 +1017,7 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
     }
   }
 
-  // 3.6.4：算术题解锁弹窗（act[21]）。答对才执行 终止 / 静音。
+  // 3.6.4：算术题解锁弹窗（act[21]）。答对才执行 终止 / 静音 / 贪睡。
   if (mathOpen) {
     val problem = mathProblem
     if (problem != null) {
@@ -989,6 +1025,7 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
         title = "算术题解锁",
         initial = "",
         numeric = true,
+        message = problem.first,
         onConfirm = { t ->
           mathOpen = false
           if (t.toIntOrNull() == problem.second) {

@@ -348,7 +348,7 @@ fun TimerApp() {
                 toast(context, "发现新版本 ${info.tag}，开始下载…")
                 val file = try { AtkUpdater.download(context, info, proxy) } catch (e: Exception) { null }
                 if (file == null) {
-                  toast(context, "下载失败：代理可能不可用，请更换下载代理")
+                  toast(context, "下载失败：代理可能不可用，请更换更新下载代理")
                 } else {
                   toast(context, "下载完成，正在打开安装…")
                   AtkUpdater.install(context, file)
@@ -893,7 +893,7 @@ private val WAIT_SETTINGS = listOf(
 private val OTHER_SETTINGS = listOf(
   SettingDef("update", "检查更新周期", listOf("3天", "7天", "30天", "不检查"), "3天"),
   // 3.6.5：下载代理保留在系统设置（仅配置项），实际的「检查更新」动作已移至菜单「检查更新」。
-  SettingDef("update_proxy", "下载代理", AtkUpdater.PROXIES, "直连（不使用代理）"),
+  SettingDef("update_proxy", "更新下载代理", AtkUpdater.PROXIES, "直连（不使用代理）"),
 )
 
 @Composable

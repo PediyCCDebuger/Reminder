@@ -458,11 +458,23 @@ fun AtkInputDialog(
   onConfirm: (String) -> Unit,
   onDismiss: () -> Unit,
   numeric: Boolean = false,
+  message: String = "",
 ) {
   var text by remember { mutableStateOf(initial) }
   Dialog(onDismissRequest = onDismiss) {
     Column(Modifier.fillMaxWidth().background(AtkSkin.lightPanel)) {
       AtkDialogTitle(title)
+      if (message.isNotBlank()) {
+        Text(
+          message,
+          color = Color(0xFF222222),
+          fontSize = 22.sp,
+          fontWeight = FontWeight.Medium,
+          modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        )
+      }
       BasicTextField(
         value = text,
         onValueChange = { text = it },

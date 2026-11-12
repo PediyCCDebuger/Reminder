@@ -291,6 +291,34 @@ class AtkEngine(private val context: Context) {
     }
   }
 
+  /**
+   * 3.6.5：挂「贪睡」重响。10 分钟后以 ATK_SNOOZE_FIRE 广播重新触发（setAlarmClock，保证深睡/
+   * Doze 下也能准时唤醒，避免此前 setExactAndAllowWhileIdle 被延后导致「贪睡后再也不响」）。
+   * 仅负责挂钟，不停止前台服务、不 dismiss。
+   */
+  fun armSnooze(id: Long) {
+    val pi = PendingIntent.getBroadcast(
+      context, (id * 7 + 6).toInt(),
+      Intent(context, AtkReceiver::class.java).apply {
+        this.action = "app.lentikr.reminder.ATK_SNOOZE_FIRE"
+        putExtra(EXTRA_ID, id)
+      },
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+    val at = System.currentTimeMillis() + 10 * 60 * 1000L
+    val aci = AlarmManager.AlarmClockInfo(at, pi)
+    try {
+      alarms.setAlarmClock(aci, pi)
+    } catch (e: SecurityException) {
+      try {
+        alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+      } catch (e2: SecurityException) {
+        alarms.set(AlarmManager.RTC_WAKEUP, at, pi)
+      }
+    }
+    AtkDiag.log(context, "贪睡: 已挂 10 分钟后重响 id=$id")
+  }
+
   /** Next fire time in epoch millis, or 0 when the rule yields nothing. Never throws. */
   fun nextMillis(item: AtkItem, after: LocalDateTime = LocalDateTime.now()): Long {
     try {

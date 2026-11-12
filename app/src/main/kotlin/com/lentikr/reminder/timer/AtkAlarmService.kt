@@ -1,8 +1,10 @@
 package com.lentikr.reminder.timer
 
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -45,7 +47,11 @@ class AtkAlarmService : Service() {
     const val ACTION_SNOOZE = "svc_snooze"
     /** Set by 60 秒后真实触发 so the test fires the chain even on a disabled task. */
     const val EXTRA_FORCE = "svc_force"
+    /** 标记本次 service 启动来自「贪睡重响」，用于自动贪睡计数跨重响延续、不重置。 */
+    const val EXTRA_FROM_SNOOZE = "svc_from_snooze"
     private const val WAKE_TIMEOUT_MS = 20 * 60 * 1000L
+    // 3.6.5：自动贪睡剩余次数（按闹钟 id 保存，跨贪睡重响仍有效）。
+    private val autoSnoozeLeft = mutableMapOf<Long, Int>()
   }
 
   private var wakeLock: PowerManager.WakeLock? = null
@@ -57,6 +63,11 @@ class AtkAlarmService : Service() {
   private var sensorManager: SensorManager? = null
   private var gravityListener: SensorEventListener? = null
   private var flipMode = 0
+  // 3.6.5：电源键按下（act[25]）与自动贪睡（act[14]）。
+  private var powerReceiver: BroadcastReceiver? = null
+  private var autoSnoozeHandler: Handler? = null
+  private var autoSnoozeTask: Runnable? = null
+  private var snapDurMin = 10
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -69,7 +80,9 @@ class AtkAlarmService : Service() {
     val action = intent?.getStringExtra(EXTRA_ACTION) ?: ACTION_START
     val id = intent?.getLongExtra(AtkEngine.EXTRA_ID, -1L) ?: -1L
     val force = intent?.getBooleanExtra(EXTRA_FORCE, false) ?: false
-    AtkDiag.log(this, "svc: onStartCommand action=$action id=$id force=$force")
+    val fromSnooze = intent?.getBooleanExtra(EXTRA_FROM_SNOOZE, false) ?: false
+    snoozeStartId = startId
+    AtkDiag.log(this, "svc: onStartCommand action=$action id=$id force=$force fromSnooze=$fromSnooze")
 
     if (action == ACTION_STOP || action == ACTION_SNOOZE) {
       stopEverything(startId)
@@ -154,8 +167,106 @@ class AtkAlarmService : Service() {
     runCatching { AtkStore(this).log(id, 1, item.name) }
     runCatching { engine.schedule(item) }
     runCatching { engine.refreshNext() }
+
+    // 3.6.5：电源键按下（act[25]）与自动贪睡（act[14]）。
+    // act[25]：暂停提醒 / 自动贪睡——响铃中按电源键的处理。
+    // act[14]：未手动关闭时，每隔「预设时间(act[13])」自动贪睡，最多 N 次。
+    val powerStyle = AtkItem.intOf(item.actValue(25)) // 0 暂停提醒 / 1 自动贪睡
+    val snapRepeat = AtkItem.intOf(item.actValue(14)).coerceIn(0, 10) // 0 = 无，N = N 次
+    val snapIdx = AtkItem.intOf(item.actValue(13)).coerceIn(0, AtkOptions.SNAP_DUR.lastIndex)
+    snapDurMin = snapMinutes(AtkOptions.SNAP_DUR[snapIdx]) // 预设时间（存的是选项索引）
+    if (powerStyle != -1) registerPowerReceiver(powerStyle, id)
+    if (snapRepeat > 0) {
+      // 真正触发（fromSnooze=false）时重置自动贪睡次数，开启新一轮；贪睡重响（fromSnooze=true）
+      // 时保留已递减的次数，避免无限贪睡或次日失效。
+      if (!fromSnooze || autoSnoozeLeft[id] == null) autoSnoozeLeft[id] = snapRepeat
+      armAutoSnooze(id)
+    } else {
+      autoSnoozeLeft.remove(id)
+    }
     return START_NOT_STICKY
   }
+
+  /** 解析「预设时间」分钟数：act[13] 存的是选项索引，先经 SNAP_DUR 取到「N分钟」文案再转数字。 */
+  private fun snapMinutes(v: String): Int {
+    val n = v.filter { it.isDigit() }.toIntOrNull() ?: 10
+    return n.coerceIn(1, 60)
+  }
+
+  /**
+   * 3.6.5：自动贪睡——闹钟响铃 snapDurMin 分钟后若仍未被关闭，自动贪睡一次。
+   * 剩余次数存于 companion，贪睡重响重启服务后仍可继续，直到用尽。
+   */
+  private fun armAutoSnooze(id: Long) {
+    val left = autoSnoozeLeft[id] ?: return
+    if (left <= 0) return
+    cancelAutoSnooze()
+    autoSnoozeHandler = Handler(Looper.getMainLooper())
+    autoSnoozeTask = object : Runnable {
+      override fun run() {
+        // 仅当本闹钟仍在响铃（未被关闭）时才自动贪睡。
+        if (currentId == id && AtkAlarmSound.isPlaying()) {
+          AtkDiag.log(this@AtkAlarmService, "svc: 自动贪睡触发 id=$id 剩余=${left - 1}")
+          val remain = left - 1
+          autoSnoozeLeft[id] = remain
+          AtkAlarmSound.stop()
+          AtkEngine(this@AtkAlarmService).armSnooze(id)
+          stopEverything(startIdForSnooze())
+        }
+      }
+    }
+    autoSnoozeHandler?.postDelayed(autoSnoozeTask, snapDurMin * 60L * 1000L)
+    AtkDiag.log(this, "svc: 自动贪睡已挂 ${snapDurMin} 分钟 id=$id 剩余=$left")
+  }
+
+  private fun cancelAutoSnooze() {
+    try { autoSnoozeTask?.let { autoSnoozeHandler?.removeCallbacks(it) } } catch (e: Exception) { }
+    autoSnoozeTask = null
+    autoSnoozeHandler = null
+  }
+
+  /**
+   * 3.6.5：电源键按下监听。用 ACTION_SCREEN_OFF 作为电源键代理（按电源键会熄灭屏幕），
+   * 在响铃中按下电源键按 act[25] 处理：暂停提醒=停止响铃并保留排程；自动贪睡=贪睡一次。
+   */
+  private fun registerPowerReceiver(powerStyle: Int, id: Long) {
+    powerReceiver = object : BroadcastReceiver() {
+      override fun onReceive(c: Context?, intent: Intent?) {
+        if (intent?.action == Intent.ACTION_SCREEN_OFF && currentId == id) {
+          AtkDiag.log(this@AtkAlarmService, "svc: 电源键按下（灭屏）powerStyle=$powerStyle id=$id")
+          unregisterPowerReceiver()
+          if (powerStyle == 1) {
+            // 自动贪睡：停止响铃并挂 10 分钟重响。
+            AtkAlarmSound.stop()
+            AtkEngine(this@AtkAlarmService).armSnooze(id)
+            stopEverything(startIdForSnooze())
+          } else {
+            // 暂停提醒：停止响铃，保留该闹钟的后续排程（含自动贪睡），不 dismiss。
+            AtkAlarmSound.stop()
+            cancelAutoSnooze()
+            autoSnoozeLeft.remove(id)
+            stopEverything(startIdForSnooze())
+          }
+        }
+      }
+    }
+    try {
+      registerReceiver(powerReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
+      AtkDiag.log(this, "svc: 电源键监听已注册 id=$id")
+    } catch (e: Exception) {
+      AtkDiag.log(this, "svc: 电源键监听注册失败 ${e.message}")
+    }
+  }
+
+  private fun unregisterPowerReceiver() {
+    try { powerReceiver?.let { unregisterReceiver(it) } } catch (e: Exception) { }
+    powerReceiver = null
+  }
+
+  /** onStartCommand 携带的 startId 在回调外不可得，用此保存以便 stopEverything。 */
+  private var snoozeStartId = 0
+  private fun startIdForSnooze(): Int = snoozeStartId
+
 
   /**
    * Read the firing task from the database, retrying a few times because the alarm may have
@@ -299,13 +410,11 @@ class AtkAlarmService : Service() {
   private fun flipSnooze(id: Long) {
     AtkDiag.log(this, "svc: 翻转贪睡 id=$id")
     unregisterFlipSensor()
-    // 与执行界面「贪睡」一致：停止响铃 → 广播 ACTION_SNOOZE（其会停止前台服务并安排 10 分钟后重响，
-    // 且 3.6.5 起重响改 setAlarmClock，保证深睡也能再响）。
     AtkAlarmSound.stop()
-    sendBroadcast(Intent(this, AtkReceiver::class.java).apply {
-      action = AtkEngine.ACTION_SNOOZE
-      putExtra(AtkEngine.EXTRA_ID, id)
-    })
+    // 3.6.5：直接挂 10 分钟贪睡重响（engine.armSnooze），并停止本前台服务。
+    // 此前经 ACTION_SNOOZE 广播绕一圈再停服务，时序不确定，导致贪睡重响丢失、闹钟不再响。
+    AtkEngine(this).armSnooze(id)
+    stopSelf()
   }
 
   private fun flipMute(id: Long) {
@@ -319,6 +428,8 @@ class AtkAlarmService : Service() {
   private fun stopEverything(startId: Int) {
     AtkAlarmSound.stop()
     unregisterFlipSensor()
+    unregisterPowerReceiver()
+    cancelAutoSnooze()
     releaseWakeLock()
     if (foreground) {
       try {
@@ -369,6 +480,8 @@ class AtkAlarmService : Service() {
     // "锁屏 / 退到后台就听不到闹钟").
     AtkDiag.log(this, "svc: onDestroy（前台=$foreground, 仍持唤醒锁=${wakeLock?.isHeld == true}）")
     unregisterFlipSensor()
+    unregisterPowerReceiver()
+    cancelAutoSnooze()
     releaseWakeLock()
     if (foreground) {
       try {
