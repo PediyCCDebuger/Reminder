@@ -35,3 +35,6 @@ keystore.properties
 
 # Heap dumps from a crashed Gradle daemon
 *.hprof
+
+# Local release artifacts (CI uses $RUNNER_TEMP/dist, never the repo dist/)
+dist/
