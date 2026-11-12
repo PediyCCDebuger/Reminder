@@ -107,7 +107,7 @@ class AtkAlarmService : Service() {
     // 3.6.4: 屏幕模式 = 不点亮屏幕 (act[15]=0) 时，不走全屏 intent、用静默渠道，让屏幕真正不亮。
     var lightScreen = AtkItem.intOf(item.actValue(15)) != 0
     // 3.6.5：全局「任务执行时电源模式」= 全唤醒 时，强制点亮屏幕（覆盖 per-timer act[15]）。
-    if (AtkEngine(this).globalPowerForceLight()) lightScreen = true
+    if (engine.globalPowerForceLight()) lightScreen = true
 
     // 3.6.5：翻转感应（act[18]）由前台服务统一监听，无论是否点亮屏幕都生效。
     flipMode = AtkItem.intOf(item.actValue(18))

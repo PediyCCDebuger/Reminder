@@ -264,12 +264,13 @@ class AtkEngine(private val context: Context) {
   fun globalPowerForceLight(): Boolean =
     (atkPrefs().getString("power", "半唤醒(节电模式)") ?: "半唤醒(节电模式)") == "全唤醒"
 
-  /** 当前是否处于通话中（无需权限，仅读 AudioManager 状态）。 */
+  /** 当前是否处于通话中（无需权限，仅读 AudioManager 通话模式）。 */
   fun isInCall(): Boolean {
     return try {
       val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) am.isInCall
-      else (am.mode == AudioManager.MODE_IN_CALL || am.mode == AudioManager.MODE_IN_COMMUNICATION)
+      // AudioManager 无公开 isInCall() 接口，通话中以 MODE_IN_CALL / MODE_IN_COMMUNICATION 体现；
+      // 统一用模式判断，不依赖 SDK 版本的特定属性。
+      am.mode == AudioManager.MODE_IN_CALL || am.mode == AudioManager.MODE_IN_COMMUNICATION
     } catch (e: Exception) { false }
   }
 
