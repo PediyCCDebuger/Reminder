@@ -30,6 +30,8 @@ keystore.properties
 *.apk
 *.aab
 /app/release/
+# Downloaded CI build artifacts (sideload APKs fetched locally)
+/out/
 
 # Heap dumps from a crashed Gradle daemon
 *.hprof
