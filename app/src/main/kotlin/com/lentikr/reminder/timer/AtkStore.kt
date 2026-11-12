@@ -253,6 +253,8 @@ class AtkStore(private val context: Context) {
       val keep = context.getSharedPreferences("atk_settings", Context.MODE_PRIVATE)
         .getString("log_keep", "一个月")
       val days = when (keep) {
+        "3天" -> 3
+        "一星期" -> 7
         "三个月" -> 90
         "半年" -> 180
         "一年" -> 365
@@ -282,6 +284,15 @@ class AtkStore(private val context: Context) {
       }
     }
     return out
+  }
+
+  /** 清空全部执行日志（actlog 表）。3.6.5：配合「执行日志保存期限」提供手动清理入口。 */
+  fun clearLogs() {
+    try {
+      db().delete("actlog", null, null)
+    } catch (e: Exception) {
+      // 清理失败不应影响其它操作。
+    }
   }
 
   /** Import an AddinTimer .atk (or any SQLite file with a timer/param table). Returns row count. */

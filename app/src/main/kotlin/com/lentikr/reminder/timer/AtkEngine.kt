@@ -1,6 +1,7 @@
 package com.lentikr.reminder.timer
 
 import android.app.AlarmManager
+import android.media.AudioManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -231,6 +232,62 @@ class AtkEngine(private val context: Context) {
     return PendingIntent.getBroadcast(
       context, code, i, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
+  }
+
+  // ---------------------------------------------------------------- 3.6.5：全局遗留选项
+  private fun atkPrefs() = context.getSharedPreferences("atk_settings", Context.MODE_PRIVATE)
+
+  /** 执行等待倒计时（全局 wait）：返回延迟毫秒，不等待为 0。 */
+  fun globalWaitMs(): Long {
+    return when (atkPrefs().getString("wait", "不等待") ?: "不等待") {
+      "5秒" -> 5000L
+      "10秒" -> 10000L
+      "15秒" -> 15000L
+      "30秒" -> 30000L
+      else -> 0L
+    }
+  }
+
+  /** 伴随振动模式（全局 vibrate）：无振动(-1, 不覆盖 per-timer) / 短振动(1) / 长振动(4)。 */
+  fun globalVibrate(): Int {
+    return when (atkPrefs().getString("vibrate", "无振动") ?: "无振动") {
+      "短振动" -> 1
+      "长振动" -> 4
+      else -> -1
+    }
+  }
+
+  /** 通话中例外（全局 call）：取值「无例外 / 停止执行 / 延迟5分钟执行」。 */
+  fun globalCallMode(): String = atkPrefs().getString("call", "无例外") ?: "无例外"
+
+  /** 任务执行时电源模式（全局 power）：「全唤醒」时强制点亮屏幕（覆盖 per-timer act[15]）。 */
+  fun globalPowerForceLight(): Boolean =
+    (atkPrefs().getString("power", "半唤醒(节电模式)") ?: "半唤醒(节电模式)") == "全唤醒"
+
+  /** 当前是否处于通话中（无需权限，仅读 AudioManager 状态）。 */
+  fun isInCall(): Boolean {
+    return try {
+      val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) am.isInCall
+      else (am.mode == AudioManager.MODE_IN_CALL || am.mode == AudioManager.MODE_IN_COMMUNICATION)
+    } catch (e: Exception) { false }
+  }
+
+  /** 通话中「延迟5分钟执行」：用同一 fireIntent 重排 delayMs 后触发（setAlarmClock，保证唤醒）。 */
+  fun fireNowDelayed(id: Long, delayMs: Long) {
+    val pi = fireIntent(id)
+    for (old in legacyFireIntents(id)) runCatching { alarms.cancel(old) }
+    val at = System.currentTimeMillis() + delayMs
+    val aci = AlarmManager.AlarmClockInfo(at, pi)
+    try {
+      alarms.setAlarmClock(aci, pi)
+    } catch (e: SecurityException) {
+      try {
+        alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+      } catch (e2: SecurityException) {
+        alarms.set(AlarmManager.RTC_WAKEUP, at, pi)
+      }
+    }
   }
 
   /** Next fire time in epoch millis, or 0 when the rule yields nothing. Never throws. */

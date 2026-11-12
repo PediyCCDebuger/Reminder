@@ -4,8 +4,14 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 
 /**
@@ -47,6 +53,10 @@ class AtkAlarmService : Service() {
   private var foreground = false
   /** Avoid re-cancelling (and re-alerting) the same alarm when onCreate starts us again. */
   private var mountedId = -1L
+  // 3.6.5：翻转感应（act[18]）由前台服务统一监听，无论是否点亮屏幕都生效。
+  private var sensorManager: SensorManager? = null
+  private var gravityListener: SensorEventListener? = null
+  private var flipMode = 0
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -95,7 +105,13 @@ class AtkAlarmService : Service() {
     acquireWakeLock()
     engine.ensureChannel()
     // 3.6.4: 屏幕模式 = 不点亮屏幕 (act[15]=0) 时，不走全屏 intent、用静默渠道，让屏幕真正不亮。
-    val lightScreen = AtkItem.intOf(item.actValue(15)) != 0
+    var lightScreen = AtkItem.intOf(item.actValue(15)) != 0
+    // 3.6.5：全局「任务执行时电源模式」= 全唤醒 时，强制点亮屏幕（覆盖 per-timer act[15]）。
+    if (AtkEngine(this).globalPowerForceLight()) lightScreen = true
+
+    // 3.6.5：翻转感应（act[18]）由前台服务统一监听，无论是否点亮屏幕都生效。
+    flipMode = AtkItem.intOf(item.actValue(18))
+    if (flipMode != 0) registerFlipSensor(id)
 
     // Play the tone (idempotent: the activity that launched this service already started it, so
     // this is normally a no-op). Keeping the tone in one process-wide singleton means it survives
@@ -243,8 +259,66 @@ class AtkAlarmService : Service() {
     }
   }
 
+  /**
+   * 3.6.5：在前台服务（常驻）注册重力 / 加速度传感器，监听翻转（屏幕朝下 z<-7）。翻转后：
+   * flipMode==1 → 贪睡（与执行界面「贪睡」一致）；flipMode==2 → 静音（停止响铃并 dismiss）。
+   * 放在服务而非 Activity，是因为「不点亮屏幕」模式下 Activity 不会被创建，此前翻转失效。
+   */
+  private fun registerFlipSensor(id: Long) {
+    try {
+      val sm = getSystemService(Context.SENSOR_SERVICE) as? SensorManager ?: return
+      val sensor = sm.getDefaultSensor(Sensor.TYPE_GRAVITY)
+        ?: sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: return
+      sensorManager = sm
+      var armed = true
+      gravityListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+          val z = event.values[2]
+          if (armed && z < -7f && flipMode != 0) {
+            armed = false
+            if (flipMode == 1) flipSnooze(id) else flipMute(id)
+          } else if (z > 7f) {
+            armed = true
+          }
+        }
+        override fun onAccuracyChanged(s: Sensor?, accuracy: Int) {}
+      }
+      sm.registerListener(gravityListener, sensor, SensorManager.SENSOR_DELAY_NORMAL)
+      AtkDiag.log(this, "svc: 翻转感应已注册 flipMode=$flipMode")
+    } catch (e: Exception) {
+      AtkDiag.log(this, "svc: 翻转感应注册失败 ${e.message}")
+    }
+  }
+
+  private fun unregisterFlipSensor() {
+    try { sensorManager?.unregisterListener(gravityListener) } catch (e: Exception) { }
+    sensorManager = null
+    gravityListener = null
+  }
+
+  private fun flipSnooze(id: Long) {
+    AtkDiag.log(this, "svc: 翻转贪睡 id=$id")
+    unregisterFlipSensor()
+    // 与执行界面「贪睡」一致：停止响铃 → 广播 ACTION_SNOOZE（其会停止前台服务并安排 10 分钟后重响，
+    // 且 3.6.5 起重响改 setAlarmClock，保证深睡也能再响）。
+    AtkAlarmSound.stop()
+    sendBroadcast(Intent(this, AtkReceiver::class.java).apply {
+      action = AtkEngine.ACTION_SNOOZE
+      putExtra(AtkEngine.EXTRA_ID, id)
+    })
+  }
+
+  private fun flipMute(id: Long) {
+    AtkDiag.log(this, "svc: 翻转静音 id=$id")
+    unregisterFlipSensor()
+    AtkAlarmSound.stop()
+    runCatching { AtkEngine(this).dismiss(id) }
+    stopSelf()
+  }
+
   private fun stopEverything(startId: Int) {
     AtkAlarmSound.stop()
+    unregisterFlipSensor()
     releaseWakeLock()
     if (foreground) {
       try {
@@ -294,6 +368,7 @@ class AtkAlarmService : Service() {
     // (foreground still true here means the FGS was torn down externally — the root cause of
     // "锁屏 / 退到后台就听不到闹钟").
     AtkDiag.log(this, "svc: onDestroy（前台=$foreground, 仍持唤醒锁=${wakeLock?.isHeld == true}）")
+    unregisterFlipSensor()
     releaseWakeLock()
     if (foreground) {
       try {

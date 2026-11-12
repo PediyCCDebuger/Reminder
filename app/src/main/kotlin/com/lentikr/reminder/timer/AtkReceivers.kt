@@ -140,7 +140,7 @@ object AtkAlarmSound {
    * screen rings the instant the alarm fires), then the foreground service and later the
    * 执行界面 call play() again for the same task and must not restart it from the beginning.
    */
-  fun play(context: Context, item: AtkItem? = null, force: Boolean = false) {
+  fun play(context: Context, item: AtkItem? = null, force: Boolean = false, delayMs: Long = 0, vibrateOverride: Int = -1) {
     val app = context.applicationContext
     val itemId = item?.id ?: -1L
     if (!force && active && currentId == itemId) {
@@ -162,39 +162,48 @@ object AtkAlarmSound {
     // 渐响模式 (act[10]): 0 = 立即; n = 渐响 n*10 秒.
     val rampMode = item?.let { AtkItem.intOf(it.actValue(10)) } ?: 0
     val rampSeconds = (rampMode * 10).coerceIn(0, 90)
-    val startVol = if (rampSeconds > 0) (maxVol * 0.05f).coerceAtLeast(0.02f) else maxVol
+    // 3.6.5：回退到 3.6.1 的有效渐响手感——起始音量稍大（约满音的 12%），随后平滑渐强到满音。
+    // 此前（3.6.2+）起始仅 5% 且 Ringtone 回退路径完全不渐响，实际表现成「一上来就是最大声」。
+    val startVol = if (rampSeconds > 0) (maxVol * 0.12f).coerceAtLeast(0.04f) else maxVol
 
-    if (uri == null) {
-      AtkDiag.log(app, "音: act[7]=「无」，只振动")
-    } else if (startPlayer(app, uri, startVol)) {
-      AtkDiag.log(app, "音: MediaPlayer 起播 目标音量=${(maxVol * 100).toInt()}% 渐响=${rampSeconds}s")
-      if (rampSeconds > 0) scheduleRamp(startVol, maxVol, rampSeconds)
-    } else if (startRingtone(app, uri)) {
-      AtkDiag.log(app, "音: MediaPlayer 失败，回退 Ringtone（无渐响）")
-    } else {
-      AtkDiag.log(app, "音: 无法播放 $uri")
+    // 3.6.5：实际起播逻辑封装为 lambda，便于在「执行等待倒计时」下延迟执行。
+    val beginTone: () -> Unit = {
+      if (uri == null) {
+        AtkDiag.log(app, "音: act[7]=「无」，只振动")
+      } else if (startPlayer(app, uri, startVol)) {
+        AtkDiag.log(app, "音: MediaPlayer 起播 目标音量=${(maxVol * 100).toInt()}% 渐响=${rampSeconds}s")
+        if (rampSeconds > 0) scheduleRamp(startVol, maxVol, rampSeconds)
+      } else if (startRingtone(app, uri, startVol)) {
+        AtkDiag.log(app, "音: MediaPlayer 失败，回退 Ringtone 渐响（起始=${(startVol * 100).toInt()}%）")
+      } else {
+        AtkDiag.log(app, "音: 无法播放 $uri")
+      }
+      // 振动（act[12] 或全局「伴随振动模式」覆盖）。
+      startVibration(app, item, if (vibrateOverride >= 0) vibrateOverride else null)
+      // Activate the media session AFTER the player is up so the mediaPlayback foreground service
+      // is genuinely playing media when startForeground claims that type.
+      activateSession(app)
+      // Safety net: never let a tone ring forever. Force-stop after 10 minutes from tone start.
+      try {
+        Handler(Looper.getMainLooper()).postDelayed({
+          if (active && currentId == itemId) {
+            AtkDiag.log(app, "音: 到达 10 分钟上限，自动停止")
+            stop()
+          }
+        }, 10 * 60 * 1000L)
+      } catch (e: Exception) {
+      }
     }
 
-    startVibration(app, item)
-    // Safety net: never let a tone ring forever. If the ringing activity and the foreground
-    // service are both gone but the process survives (e.g. the ROM killed the surface without
-    // stopping the singleton player), force-stop after 10 minutes.
-    try {
-      Handler(Looper.getMainLooper()).postDelayed({
-        if (active && currentId == itemId) {
-          AtkDiag.log(app, "音: 到达 10 分钟上限，自动停止")
-          stop()
-        }
-      }, 10 * 60 * 1000L)
-    } catch (e: Exception) {
-    }
-    // Activate the media session AFTER the player is up so the mediaPlayback foreground service
-    // is genuinely playing media when startForeground claims that type.
-    activateSession(app)
-    // 3.1.0: take the CPU wake lock LAST. play() calls stop() at its start, and stop() releases
-    // this lock, so acquiring it before play() would silently undo it (Smart Alarm holds the
-    // lock for the whole ringing period).
+    // 3.1.0: take the CPU wake lock so the tone keeps ringing (and, for 执行等待倒计时, the
+    // countdown stays accurate) with the screen off.
     holdCpu(app)
+    if (delayMs > 0) {
+      AtkDiag.log(app, "音: 执行等待倒计时 ${delayMs}ms 后起播")
+      Handler(Looper.getMainLooper()).postDelayed(beginTone, delayMs)
+    } else {
+      beginTone()
+    }
   }
 
   /**
@@ -251,7 +260,7 @@ object AtkAlarmSound {
     false
   }
 
-  private fun startRingtone(context: Context, uri: android.net.Uri): Boolean = try {
+  private fun startRingtone(context: Context, uri: android.net.Uri, volume: Float): Boolean = try {
     val r = RingtoneManager.getRingtone(context, uri)
     if (r == null) {
       false
@@ -262,6 +271,11 @@ object AtkAlarmSound {
         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
         .build()
       r.play()
+      // 3.6.5：Ringtone 路径同样支持渐响（API 28+）。此前回退到 Ringtone 时一上来就是最大音量，
+      // 正是「渐强被忽略」的根因——部分机型 MediaPlayer 播放自定义铃声 URI 会失败从而走此路径。
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        try { r.setVolume(volume) } catch (e: Exception) { }
+      }
       ringtone = r
       active = true
       true
@@ -281,6 +295,10 @@ object AtkAlarmSound {
         val ratio = step.toFloat() / seconds
         val v = (from + (to - from) * ratio).coerceIn(0f, 1f)
         try { player?.setVolume(v, v) } catch (e: Exception) { }
+        // 3.6.5：Ringtone 回退路径（API 28+）也同步渐响。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+          try { ringtone?.setVolume(v) } catch (e: Exception) { }
+        }
         if (step < seconds) h.postDelayed(this, 1000L)
       }
     }
@@ -288,9 +306,10 @@ object AtkAlarmSound {
     h.postDelayed(task, 1000L)
   }
 
-  /** 振动类型 (act[12]): 0 无振动 / 1 跟随音乐起停 / 2..4 音乐前振动 10..30 秒. */
-  private fun startVibration(context: Context, item: AtkItem?) {
-    val mode = item?.let { AtkItem.intOf(it.actValue(12)) } ?: 1
+  /** 振动类型 (act[12]): 0 无振动 / 1 跟随音乐起停 / 2..4 音乐前振动 10..30 秒.
+   *  override >=0 时为全局「伴随振动模式」覆盖（无振动=0 / 短振动=1 / 长振动=4）。 */
+  private fun startVibration(context: Context, item: AtkItem?, override: Int? = null) {
+    val mode = override ?: (item?.let { AtkItem.intOf(it.actValue(12)) } ?: 1)
     if (mode <= 0) return
     val vib: Vibrator = try {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -384,9 +403,29 @@ class AtkReceiver : BroadcastReceiver() {
           // from inside its LaunchAlarm service. So the notification now belongs to the
           // service, never to this broadcast.
           engine.ensureChannel()
+          // 3.6.5：通话中例外（全局 call）。
+          val callMode = engine.globalCallMode()
+          if (callMode != "无例外" && engine.isInCall()) {
+            if (callMode == "停止执行") {
+              AtkDiag.log(context, "触发: 通话中，按设置停止执行 id=$id")
+              engine.schedule(item)
+              engine.refreshNext()
+              pending.finish()
+              return
+            } else if (callMode == "延迟5分钟执行") {
+              AtkDiag.log(context, "触发: 通话中，按设置延迟5分钟 id=$id")
+              engine.fireNowDelayed(id, 5 * 60 * 1000L)
+              pending.finish()
+              return
+            }
+          }
           // 1) Tone first: a killed/slow service must not leave the alarm silent.
           //    play() also acquires the CPU wake lock for the whole ringing period.
-          AtkAlarmSound.play(context, item)
+          AtkAlarmSound.play(
+            context, item,
+            delayMs = engine.globalWaitMs(),
+            vibrateOverride = engine.globalVibrate(),
+          )
           // 2) Start the FGS; IT mounts the full-screen notification via startForeground()
           //    AND directly starts the 执行界面 (3.6.0: see AtkAlarmService). A foreground
           //    process launch is the only path ColorOS honours for turning the screen on.
@@ -407,7 +446,23 @@ class AtkReceiver : BroadcastReceiver() {
         AtkDiag.log(context, "贪睡到点 id=$id 任务=${item?.name}")
         if (item != null && item.enabled) {
           engine.ensureChannel()
-          AtkAlarmSound.play(context, item)
+          // 3.6.5：通话中例外（全局 call）同样作用于贪睡重响。
+          val callMode = engine.globalCallMode()
+          if (callMode != "无例外" && engine.isInCall()) {
+            if (callMode == "停止执行") {
+              AtkDiag.log(context, "贪睡到点: 通话中，停止执行 id=$id")
+              return
+            } else if (callMode == "延迟5分钟执行") {
+              AtkDiag.log(context, "贪睡到点: 通话中，延迟5分钟 id=$id")
+              engine.fireNowDelayed(id, 5 * 60 * 1000L)
+              return
+            }
+          }
+          AtkAlarmSound.play(
+            context, item,
+            delayMs = engine.globalWaitMs(),
+            vibrateOverride = engine.globalVibrate(),
+          )
           startAlarmService(context, engine, id, false)
           AtkDiag.log(context, "全屏通知: 已交给前台服务挂载（贪睡）id=$id")
           store.log(id, 2, item.name + " 贪睡")
@@ -429,12 +484,14 @@ class AtkReceiver : BroadcastReceiver() {
           PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val at = System.currentTimeMillis() + 10 * 60 * 1000L
-        // 3.5.0：贪睡也改用 setExactAndAllowWhileIdle，避免 setAlarmClock 压制 FSI（与真实排程一致）。
+        // 3.6.5：贪睡重响改回 setAlarmClock（与真实排程一致），保证深睡 / Doze 下也能准时唤醒，
+        // 避免此前 setExactAndAllowWhileIdle 被延后投递导致「贪睡后再也不响」。
+        val aci = AlarmManager.AlarmClockInfo(at, pi)
         try {
-          alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+          alarms.setAlarmClock(aci, pi)
         } catch (e: SecurityException) {
           try {
-            alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+            alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
           } catch (e2: SecurityException) {
             alarms.set(AlarmManager.RTC_WAKEUP, at, pi)
           }
@@ -543,7 +600,9 @@ class AtkAlarmActivity : ComponentActivity() {
     // 3.6.4：屏幕模式（act[15] LOCK_TYPE）。0=不点亮屏幕：不去点亮屏幕，仅响铃 + 静默通知；
     // 1/2=点亮屏幕（但不解锁 / 并解锁）。不点亮屏幕时仍允许显示在锁屏之上（showWhenLocked），
     // 这样用户亮屏后可直接看到执行界面，只是不会主动把屏幕点亮。
-    val lightScreen = AtkItem.intOf(item.actValue(15)) != 0
+    var lightScreen = AtkItem.intOf(item.actValue(15)) != 0
+    // 3.6.5：全局「任务执行时电源模式」= 全唤醒 时，强制点亮屏幕（覆盖 per-timer act[15]）。
+    if (AtkEngine(this).globalPowerForceLight()) lightScreen = true
     if (lightScreen) {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
         setShowWhenLocked(true)
@@ -762,8 +821,7 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
   }
 
   val context = LocalContext.current
-  // 3.6.4：参数化读取本任务的执行界面选项（act 索引见 AtkModel）。
-  val flipMode = AtkItem.intOf(item?.actValue(18) ?: "0") // 0 关闭 / 1 翻转贪睡 / 2 翻转静音
+  // 3.6.5：翻转感应（act[18]）已移交前台服务 AtkAlarmService 统一监听，本界面不再读取。
   val uiStyle = AtkItem.intOf(item?.actValue(26) ?: "1") // 0 滑动方式 / 1 按钮方式
   val answerProblem = AtkItem.intOf(item?.actValue(21) ?: "0") // 0 关闭 / 1 简单 / 2 稍难
   val topText = context
@@ -785,31 +843,9 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
     }
   }
 
-  // 3.6.4：翻转感应（act[18]）。手机翻转（屏幕朝下）触发 贪睡 / 静音。
-  DisposableEffect(flipMode) {
-    val sm = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
-    val sensor = sm?.getDefaultSensor(Sensor.TYPE_GRAVITY)
-      ?: sm?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-    val listener = object : SensorEventListener {
-      private var armed = true
-      override fun onSensorChanged(event: SensorEvent) {
-        // z 轴：屏幕朝上约 +9.8，翻转朝下约 -9.8。
-        val z = event.values[2]
-        if (armed && z < -7f && flipMode != 0) {
-          armed = false
-          val action = if (flipMode == 1) onSnooze else onMute
-          Handler(Looper.getMainLooper()).post { action() }
-        } else if (z > 7f) {
-          armed = true
-        }
-      }
-      override fun onAccuracyChanged(s: Sensor?, accuracy: Int) {}
-    }
-    if (sensor != null && sm != null) {
-      sm.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_NORMAL)
-    }
-    onDispose { sm?.unregisterListener(listener) }
-  }
+  // 3.6.5：翻转感应（act[18]）已移至前台服务 AtkAlarmService 统一处理，使「不亮屏」模式下也能
+  // 翻转贪睡 / 静音（此前放在 Activity 内，不亮屏时不创建 Activity 而失效）。此处不再重复注册，
+  // 避免亮屏模式下服务与界面双重触发。
 
   // Android 15+ enforces edge-to-edge: without these paddings the title strip collides with
   // the status bar and the bottom buttons sit underneath the 3-button navigation bar.
@@ -909,7 +945,7 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
                 onDrag = { _, delta -> dx += delta.x; dy += delta.y },
                 onDragEnd = {
                   if (dx * dx > dy * dy) {
-                    if (dx > 60) doAction(onStop) else if (dx < -60) onSnooze()
+                    if (dx > 60) doAction(onStop) else if (dx < -60) doAction(onSnooze)
                   } else if (dy < -60) {
                     doAction(onMute)
                   }
@@ -936,7 +972,8 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
         ) {
           AlarmFaceButton("♪", "静音", Modifier.weight(1f)) { doAction(onMute) }
           AlarmFaceDivider()
-          AlarmFaceButton("◷", "贪睡", Modifier.weight(1f), onSnooze)
+          // 3.6.5：贪睡同样经过算术题解锁门控，使「算术题解锁」真正生效（三个动作统一走 doAction）。
+          AlarmFaceButton("◷", "贪睡", Modifier.weight(1f)) { doAction(onSnooze) }
           AlarmFaceDivider()
           AlarmFaceButton("ⓘ", "终止", Modifier.weight(1f)) { doAction(onStop) }
         }
@@ -951,6 +988,7 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
       AtkInputDialog(
         title = "算术题解锁",
         initial = "",
+        numeric = true,
         onConfirm = { t ->
           mathOpen = false
           if (t.toIntOrNull() == problem.second) {

@@ -79,6 +79,8 @@ fun TimerApp() {
     val store = remember { AtkStore(context) }
     val engine = remember { AtkEngine(context) }
     val prefs = remember { context.getSharedPreferences("atk_settings", Context.MODE_PRIVATE) }
+    // 3.6.5：菜单「检查更新」需要在协程中访问网络 / 下载，复用 CoroutineScope。
+    val menuScope = rememberCoroutineScope()
 
     var screen by remember { mutableStateOf(Screen.LIST) }
     var tab by remember { mutableIntStateOf(0) }
@@ -201,6 +203,8 @@ fun TimerApp() {
         screen = Screen.LIST
         // Picking 通知栏图标 in 系统设置 takes effect as soon as we return to the list.
         try { engine.rescheduleAll() } catch (e: Exception) { }
+        // 3.6.5：从系统设置返回主列表时立即刷新，使排序 / 通知栏图标等改动所见即所得。
+        try { refresh() } catch (e: Exception) { }
       }
     }
 
@@ -325,7 +329,32 @@ fun TimerApp() {
               }
               try { context.startActivity(Intent.createChooser(send, "分享好友")) } catch (e: Exception) { }
             }
-            5 -> message = "当前已是最新版本（${com.lentikr.reminder.BuildConfig.VERSION_NAME}），无需更新。"
+            5 -> {
+              // 3.6.5：实际检查 / 下载 / 安装。下载代理取自系统设置的「下载代理」。
+              val proxy = prefs.getString("update_proxy", "直连（不使用代理）")
+                ?: "直连（不使用代理）"
+              menuScope.launch {
+                toast(context, "正在检查更新…")
+                val info = try { AtkUpdater.fetchLatest() } catch (e: Exception) { null }
+                if (info == null) {
+                  toast(context, "检查失败：网络异常或 GitHub 限流")
+                  return@launch
+                }
+                val current = com.lentikr.reminder.BuildConfig.VERSION_NAME
+                if (!AtkUpdater.isNewer(info.tag, current)) {
+                  toast(context, "已是最新版本（$current）")
+                  return@launch
+                }
+                toast(context, "发现新版本 ${info.tag}，开始下载…")
+                val file = try { AtkUpdater.download(context, info, proxy) } catch (e: Exception) { null }
+                if (file == null) {
+                  toast(context, "下载失败：代理可能不可用，请更换下载代理")
+                } else {
+                  toast(context, "下载完成，正在打开安装…")
+                  AtkUpdater.install(context, file)
+                }
+              }
+            }
             6 -> {
               try {
                 context.startActivity(
@@ -655,8 +684,9 @@ private fun MainScreen(
           },
           selectionMode = selectionMode,
           selected = item.id in selectedIds,
-          onClick = {
-            // 3.6.4：「点击定时器图标」按系统设置分支：编辑定时器 / 执行任务 / 操作菜单。
+          onClick = { onEdit(item.id) },
+          onIconClick = {
+            // 3.6.5：「点击定时器图标」仅作用于最左侧闹钟图标：编辑定时器 / 执行任务 / 操作菜单。
             when (iconClick) {
               "编辑定时器" -> onEdit(item.id)
               "执行任务" -> onExecute(item.id)
@@ -734,6 +764,7 @@ private fun AtkTimerRow(
   selectionMode: Boolean,
   selected: Boolean,
   onClick: () -> Unit,
+  onIconClick: () -> Unit,
   onLongClick: () -> Unit,
   onToggle: (Boolean) -> Unit,
 ) {
@@ -773,7 +804,11 @@ private fun AtkTimerRow(
         colorFilter = ColorFilter.tint(
           if (item.enabled) AtkSkin.green else Color(0xFF9A9A9A),
         ),
-        modifier = Modifier.size(38.dp),
+        // 3.6.5：仅最左侧闹钟图标响应「点击定时器图标」设置（操作菜单 / 编辑 / 执行）；
+        // 其余区域点击仍进入编辑。selectionMode 下该图标被复选框替代，故此处不响应。
+        modifier = Modifier
+          .size(38.dp)
+          .clickable(enabled = !selectionMode) { onIconClick() },
       )
       Spacer(Modifier.width(8.dp))
       Column(Modifier.weight(1f)) {
@@ -845,7 +880,7 @@ private val GENERAL_SETTINGS = listOf(
   SettingDef("notify_icon", "通知栏图标", listOf("应用程序图标", "定时器状态图标", "不显示"), "应用程序图标"),
   SettingDef("icon_click", "点击定时器图标", listOf("操作菜单", "编辑定时器", "执行任务"), "操作菜单"),
   SettingDef("sort", "任务排序方式", listOf("按执行时间", "按创建时间", "按名称"), "按执行时间"),
-  SettingDef("log_keep", "执行日志保存期限", listOf("一个月", "三个月", "半年", "一年", "永久"), "一个月"),
+  SettingDef("log_keep", "执行日志保存期限", listOf("3天", "一星期", "一个月", "三个月", "半年", "一年", "永久"), "一个月"),
 )
 private val TIMER_SETTINGS = listOf(
   SettingDef("power", "任务执行时电源模式", listOf("半唤醒(节电模式)", "全唤醒"), "半唤醒(节电模式)"),
@@ -857,9 +892,7 @@ private val WAIT_SETTINGS = listOf(
 )
 private val OTHER_SETTINGS = listOf(
   SettingDef("update", "检查更新周期", listOf("3天", "7天", "30天", "不检查"), "3天"),
-)
-// 3.6.4：自动更新相关设置（下载代理）。
-private val UPDATE_SETTINGS = listOf(
+  // 3.6.5：下载代理保留在系统设置（仅配置项），实际的「检查更新」动作已移至菜单「检查更新」。
   SettingDef("update_proxy", "下载代理", AtkUpdater.PROXIES, "直连（不使用代理）"),
 )
 
@@ -875,39 +908,9 @@ private fun SettingsScreen(
   // 3.6.4：执行界面顶部文字自定义入口。
   var topTextEdit by remember { mutableStateOf(false) }
   val context = LocalContext.current
-  val scope = rememberCoroutineScope()
-  var updateChecking by remember { mutableStateOf(false) }
+  // 3.6.5：清空执行日志确认弹窗开关。
+  var clearLogsConfirm by remember { mutableStateOf(false) }
   @Suppress("UNUSED_VARIABLE") val observeVersion = version
-
-  fun checkUpdate() {
-    if (updateChecking) return
-    updateChecking = true
-    toast(context, "正在检查更新…")
-    scope.launch {
-      val info = AtkUpdater.fetchLatest()
-      if (info == null) {
-        toast(context, "检查失败：网络异常或 GitHub 限流")
-        updateChecking = false
-        return@launch
-      }
-      val current = com.lentikr.reminder.BuildConfig.VERSION_NAME
-      if (!AtkUpdater.isNewer(info.tag, current)) {
-        toast(context, "已是最新版本（$current）")
-        updateChecking = false
-        return@launch
-      }
-      toast(context, "发现新版本 ${info.tag}，开始下载…")
-      val proxy = prefs.getString("update_proxy", "直连（不使用代理）") ?: "直连（不使用代理）"
-      val file = AtkUpdater.download(context, info, proxy)
-      updateChecking = false
-      if (file == null) {
-        toast(context, "下载失败：代理可能不可用，请更换下载代理")
-      } else {
-        toast(context, "下载完成，正在打开安装…")
-        AtkUpdater.install(context, file)
-      }
-    }
-  }
 
   fun valueOf(def: SettingDef): String = prefs.getString(def.key, def.default) ?: def.default
 
@@ -927,6 +930,10 @@ private fun SettingsScreen(
             }
           }
         }
+      }
+      item {
+        // 3.6.5：一键清空全部执行日志（actlog 表），删除前二次确认。
+        AtkSettingRow("清空执行日志", "删除全部执行记录", onClick = { clearLogsConfirm = true })
       }
       item { AtkSection("定时器相关") }
       for (def in TIMER_SETTINGS) {
@@ -967,25 +974,6 @@ private fun SettingsScreen(
           ?: "AddinTimer Simplify your life"
         AtkSettingRow("执行界面顶部文字", topTextValue) { topTextEdit = true }
       }
-      item { AtkSection("更新") }
-      item {
-        // 下载代理：直连 + 6 个可选代理（见 AtkUpdater.PROXIES）。
-        val proxyValue = prefs.getString("update_proxy", "直连（不使用代理）")
-          ?: "直连（不使用代理）"
-        AtkSettingRow("下载代理", proxyValue) {
-          choice = SettingChoice(UPDATE_SETTINGS[0], proxyValue) { v ->
-            prefs.edit().putString("update_proxy", v).apply()
-            version++
-          }
-        }
-      }
-      item {
-        AtkSettingRow(
-          "检查更新",
-          if (updateChecking) "正在检查 / 下载…" else "点击检查并下载安装",
-          onClick = { checkUpdate() },
-        )
-      }
       item {
         Text(
           "「服务状态」可打开新系统所需的权限自检（精确闹钟 / 通知 / 电池优化 / 全屏通知）。" +
@@ -1020,6 +1008,21 @@ private fun SettingsScreen(
         version++
       },
       onDismiss = { topTextEdit = false },
+    )
+  }
+
+  if (clearLogsConfirm) {
+    AtkMessageDialog(
+      title = "清空执行日志",
+      body = "确定删除全部执行日志？此操作不可撤销。",
+      confirmText = "清空",
+      dismissText = "取消",
+      onConfirm = {
+        clearLogsConfirm = false
+        try { AtkStore(context).clearLogs() } catch (e: Exception) { }
+        toast(context, "已清空执行日志")
+      },
+      onDismiss = { clearLogsConfirm = false },
     )
   }
 }
@@ -1193,6 +1196,9 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
   // 3.6.4：调试总开关。关闭后 触发日志 不再记录（见 AtkDiag.isDebug）。默认开启。
   var debugOn by remember { mutableStateOf(AtkDiag.isDebug(context)) }
   var showLog by remember { mutableStateOf(false) }
+  // 3.6.5：刷新状态检测后的权限总检提醒弹窗。
+  var showResult by remember { mutableStateOf(false) }
+  var resultText by remember { mutableStateOf("") }
   // 用稳定 MutableState 持有日志文本，保存回调无论何时触发都能读到最新内容（避免闭包捕获旧值）。
   val logTextState = remember { mutableStateOf("") }
   val report = remember(version) { engine.permissionReport() }
@@ -1215,19 +1221,6 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
   Column(Modifier.fillMaxSize()) {
     AtkTitleBar("权限自检", onBack = onBack)
     LazyColumn(Modifier.weight(1f)) {
-      item { AtkSection("保活（必做）") }
-      item {
-        AtkSettingRow("后台运行（必做）", "点击前往系统设置", onClick = { engine.openBackgroundSettings() })
-      }
-      item {
-        AtkSettingRow("刷新状态", "重新检测以上权限", onClick = {
-          toast(context, "正在重新检测权限状态…")
-          version++
-        })
-      }
-      item {
-        AtkSettingRow("自启动（可选）", "点击前往系统设置", onClick = { engine.openAutoStartSettings() })
-      }
       item { AtkSection("权限检测") }
       items(report) { (name, ok) ->
         AtkSettingRow(
@@ -1248,6 +1241,29 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
             }
           },
         )
+      }
+      // 3.6.5：后台运行（必做）作为权限检测部分的最后一项，置于刷新状态之前，并显示是否已开启。
+      item {
+        val bgOk = report.firstOrNull { it.first.contains("电池") }?.second ?: false
+        AtkSettingRow(
+          "后台运行（必做）",
+          if (bgOk) "已开启" else "未开启（点击前往系统设置）",
+          onClick = { engine.openBackgroundSettings() },
+        )
+      }
+      // 3.6.5：刷新状态点击后重新检测并弹权限总检提醒。
+      item {
+        AtkSettingRow("刷新状态", "重新检测以上权限", onClick = {
+          version++
+          val fresh = engine.permissionReport()
+          val bad = fresh.filter { !it.second }.map { it.first }
+          resultText = if (bad.isEmpty()) "权限都已开启" else "以下权限未开启：\n" + bad.joinToString("\n")
+          showResult = true
+        })
+      }
+      item { AtkSection("保活") }
+      item {
+        AtkSettingRow("自启动（可选）", "点击前往系统设置", onClick = { engine.openAutoStartSettings() })
       }
       item { AtkSection("诊断") }
       item {
@@ -1340,6 +1356,14 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
         }
       }
     }
+  }
+
+  if (showResult) {
+    AtkMessageDialog(
+      title = "权限检测",
+      body = resultText,
+      onDismiss = { showResult = false },
+    )
   }
 }
 
