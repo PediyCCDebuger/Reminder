@@ -63,7 +63,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.res.painterResource
@@ -941,7 +943,8 @@ class AtkAlarmActivity : ComponentActivity() {
 
 /**
  * The original full-screen 任务执行界面: title strip, date/lunar/clock, task name, bottom actions.
- * 3.7.1：静音后只剩「贪睡 / 终止」两个图标按钮；滑动方式按原版也只有这两个动作；
+ * 3.7.2：所有动作按钮一律「图标 + 文字」，静音后剩下的贪睡 / 终止也保留文字；
+ * 滑动方式两端是同样「图标 + 文字」的贪睡 / 终止按钮，中间滑块可真实左右拖动选择。
  * 手动贪睡 = 选择贪睡时间时弹出时长列表；终止按「终止确认」参数弹出警告。
  */
 @Composable
@@ -1094,54 +1097,13 @@ private fun AlarmFace(
         }
       }
       Spacer(Modifier.weight(1f))
-      // 3.7.1：滑动方式按原版只有「贪睡 / 终止」两个选项，中间是可拖动的滑块而不是第三个动作，
-      // 「↑ 静音」已移除。按钮方式在静音后也只剩两个只有图标的按钮。
+      // 3.7.2：滑动方式两端是「图标 + 文字」的贪睡 / 终止按钮，中间的滑块可真实左右拖动；
+      // 按钮方式静音后剩下两个按钮同样保留文字（不再只有图标）。两条路径都只提供这两个动作。
       if (uiStyle == 0) {
-        Box(
-          Modifier
-            .fillMaxWidth()
-            .height(120.dp)
-            .background(Brush.verticalGradient(listOf(Color(0xFF3A3A3A), Color(0xFF1A1A1A))))
-            .border(1.dp, Color(0xFF555555))
-            .pointerInput(Unit) {
-              var dx = 0f
-              var dy = 0f
-              detectDragGestures(
-                onDragStart = { dx = 0f; dy = 0f },
-                onDrag = { _, delta -> dx += delta.x; dy += delta.y },
-                onDragEnd = {
-                  if (dx * dx > dy * dy) {
-                    if (dx > 60) requestStop() else if (dx < -60) requestSnooze()
-                  }
-                },
-              )
-            },
-          contentAlignment = Alignment.Center,
-        ) {
-          // 左：贪睡；中：滑块把手；右：终止 —— 与原版滑动条一致，只有两个动作。
-          Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { FaceGlyph("◷") }
-            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-              Box(
-                Modifier
-                  .size(38.dp)
-                  .clip(CircleShape)
-                  .background(Color(0xFF6B6B6B))
-                  .border(1.dp, Color(0xFF9C9C9C), CircleShape),
-                contentAlignment = Alignment.Center,
-              ) {
-                Text("◷", color = Color(0xFFE0E0E0), fontSize = 20.sp)
-              }
-            }
-            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { FaceGlyph("ⓘ") }
-          }
-          Text(
-            "← 贪睡    终止 →",
-            color = Color(0xFFCFCFCF),
-            fontSize = 14.sp,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp),
-          )
-        }
+        AlarmFaceSlider(
+          onSnooze = { requestSnooze() },
+          onStop = { requestStop() },
+        )
       } else {
         Row(
           Modifier
@@ -1151,12 +1113,12 @@ private fun AlarmFace(
             .border(1.dp, Color(0xFF555555)),
         ) {
           if (!muted) {
-            AlarmFaceButton("♪", "静音", Modifier.weight(1f), true) { requestMute() }
+            AlarmFaceButton("♪", "静音", Modifier.weight(1f)) { requestMute() }
             AlarmFaceDivider()
           }
-          AlarmFaceButton("◷", "贪睡", Modifier.weight(1f), !muted) { requestSnooze() }
+          AlarmFaceButton("◷", "贪睡", Modifier.weight(1f)) { requestSnooze() }
           AlarmFaceDivider()
-          AlarmFaceButton("ⓘ", "终止", Modifier.weight(1f), !muted) { requestStop() }
+          AlarmFaceButton("ⓘ", "终止", Modifier.weight(1f)) { requestStop() }
         }
       }
     }
@@ -1230,12 +1192,15 @@ private fun AlarmFaceDivider() {
   Box(Modifier.width(1.dp).fillMaxHeight().background(Color(0xFF555555)))
 }
 
+/**
+ * 3.7.2：所有动作按钮一律「绿色圆形图标 + 文字」，包括静音后剩下的贪睡 / 终止，
+ * 以及滑动方式两端的目标按钮。移除 3.7.1 的 showLabel 开关，避免以后再把文字关掉。
+ */
 @Composable
 private fun AlarmFaceButton(
   symbol: String,
   label: String,
   modifier: Modifier,
-  showLabel: Boolean = true,
   onClick: () -> Unit,
 ) {
   Box(
@@ -1244,15 +1209,78 @@ private fun AlarmFaceButton(
   ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
       FaceGlyph(symbol)
-      if (showLabel) {
-        Spacer(Modifier.width(6.dp))
-        Text(label, color = Color(0xFFDDDDDD), fontSize = 14.sp)
-      }
+      Spacer(Modifier.width(6.dp))
+      Text(label, color = Color(0xFFDDDDDD), fontSize = 14.sp)
     }
   }
 }
 
-/** 3.7.1：原版执行界面底部的绿色圆形图标（静音后只剩两个，无文字）。 */
+/**
+ * 3.7.2：原版滑动条 —— 两端是与按钮方式相同的「图标 + 文字」按钮，中间灰色滑块可真实左右拖动。
+ * 拖过阈值松手即执行（左 = 贪睡、右 = 终止），幅度不足则回弹到中间；两端按钮也可直接点击。
+ */
+@Composable
+private fun AlarmFaceSlider(onSnooze: () -> Unit, onStop: () -> Unit) {
+  var dragX by remember { mutableStateOf(0f) }
+  var trackWidth by remember { mutableStateOf(0f) }
+  // 滑块最多移到左右目标区中心（整条宽度的 1/3），越过 55% 即判定为已选择。
+  val maxX = if (trackWidth > 0f) trackWidth / 3f else 0f
+  val threshold = maxX * 0.55f
+  Box(
+    Modifier
+      .fillMaxWidth()
+      .height(120.dp)
+      .background(Brush.verticalGradient(listOf(Color(0xFF3A3A3A), Color(0xFF1A1A1A))))
+      .border(1.dp, Color(0xFF555555))
+      .onSizeChanged { trackWidth = it.width.toFloat() }
+      .pointerInput(maxX, threshold) {
+        detectDragGestures(
+          onDragStart = { },
+          onDrag = { _, delta ->
+            if (maxX > 0f) dragX = (dragX + delta.x).coerceIn(-maxX, maxX)
+          },
+          onDragEnd = {
+            val choice = slideChoice(dragX, threshold)
+            dragX = 0f
+            when (choice) {
+              SlideChoice.SNOOZE -> onSnooze()
+              SlideChoice.STOP -> onStop()
+              SlideChoice.NONE -> Unit
+            }
+          },
+          onDragCancel = { dragX = 0f },
+        )
+      },
+  ) {
+    Column(Modifier.fillMaxSize()) {
+      Row(Modifier.fillMaxWidth().weight(1f), verticalAlignment = Alignment.CenterVertically) {
+        AlarmFaceButton("◷", "贪睡", Modifier.weight(1f)) { onSnooze() }
+        Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+          Box(
+            Modifier
+              .graphicsLayer { translationX = dragX }
+              .size(38.dp)
+              .clip(CircleShape)
+              .background(Color(0xFF6B6B6B))
+              .border(1.dp, Color(0xFF9C9C9C), CircleShape),
+            contentAlignment = Alignment.Center,
+          ) {
+            Text("◷", color = Color(0xFFE0E0E0), fontSize = 20.sp)
+          }
+        }
+        AlarmFaceButton("ⓘ", "终止", Modifier.weight(1f)) { onStop() }
+      }
+      Text(
+        "← 贪睡    拖动滑块    终止 →",
+        color = Color(0xFFCFCFCF),
+        fontSize = 13.sp,
+        modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 10.dp),
+      )
+    }
+  }
+}
+
+/** 原版执行界面底部的绿色圆形图标，与文字一起组成动作按钮。 */
 @Composable
 private fun FaceGlyph(symbol: String) {
   Box(
