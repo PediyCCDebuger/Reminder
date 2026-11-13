@@ -459,6 +459,8 @@ class AtkReceiver : BroadcastReceiver() {
       }
 
       AtkEngine.ACTION_FIRE -> {
+        // 3.7.1：新的一次响铃开始，清掉上一次的静音 / 用户解锁接管状态。
+        AtkAlarmState.reset()
         val pending = goAsync()
         val force = intent.getBooleanExtra(AtkEngine.EXTRA_FORCE, false)
         val item = if (id >= 0) store.get(id) else null
@@ -519,6 +521,7 @@ class AtkReceiver : BroadcastReceiver() {
       }
 
       "app.lentikr.reminder.ATK_SNOOZE_FIRE" -> {
+        AtkAlarmState.reset()
         val item = if (id >= 0) store.get(id) else null
         AtkDiag.log(context, "贪睡到点 id=$id 任务=${item?.name}")
         if (item != null && item.enabled) {
@@ -549,6 +552,7 @@ class AtkReceiver : BroadcastReceiver() {
       // 3.6.9：电源键「暂停提醒」到期——按设置暂停 N 分钟后重新执行本次任务（声音 + 振动 +
       // 通知 / 执行界面），而不是把任务停掉。与贪睡重响共用同一条触发链。
       "app.lentikr.reminder.ATK_PAUSE_RESUME" -> {
+        AtkAlarmState.reset()
         val item = if (id >= 0) store.get(id) else null
         AtkDiag.log(context, "暂停结束，继续执行 id=$id 任务=${item?.name}")
         if (item != null && item.enabled) {
@@ -565,13 +569,16 @@ class AtkReceiver : BroadcastReceiver() {
       }
 
       AtkEngine.ACTION_SNOOZE -> {
-        AtkDiag.log(context, "贪睡 id=$id")
+        // 3.7.1：手动贪睡 = 选择贪睡时间时，执行界面会带上选中的分钟数；0 / 缺省用「预设时间」。
+        val customMin = intent.getIntExtra(AtkEngine.EXTRA_SNOOZE_MINUTES, 0)
+        AtkDiag.log(context, "贪睡 id=$id 自定义分钟=$customMin")
         AtkAlarmSound.stop()
         stopAlarmService(context)
         engine.dismiss(id)
         // item 在本分支作用域内需自行取出，用于读取「预设时间」作为重响间隔。
         val item = if (id >= 0) store.get(id) else null
-        val minutes = if (item != null) engine.snoozeMinutes(item) else 10
+        val minutes = if (customMin > 0) customMin.coerceIn(1, 60)
+          else if (item != null) engine.snoozeMinutes(item) else 10
         val alarms = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val pi = PendingIntent.getBroadcast(
           context, (id * 7 + 6).toInt(),
@@ -680,6 +687,8 @@ class AtkAlarmActivity : ComponentActivity() {
   /** Held as state so a second alarm (onNewIntent) refreshes the visible task in place. */
   private val faceId = androidx.compose.runtime.mutableStateOf(-1L)
   private val faceForce = androidx.compose.runtime.mutableStateOf(false)
+  /** 3.7.1：静音形态（只剩贪睡 / 终止，不播铃）。由服务在翻转静音 / 解锁静音任务时传入。 */
+  private val faceMuted = androidx.compose.runtime.mutableStateOf(false)
   private var wakeLock: PowerManager.WakeLock? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -687,8 +696,12 @@ class AtkAlarmActivity : ComponentActivity() {
 
     faceId.value = intent.getLongExtra(AtkEngine.EXTRA_ID, -1L)
     faceForce.value = intent.getBooleanExtra(AtkEngine.EXTRA_FORCE, false)
+    faceMuted.value = intent.getBooleanExtra(AtkEngine.EXTRA_MUTED, false)
     markLaunched(faceId.value)
-    AtkDiag.log(this, "执行界面: 打开 id=${faceId.value} force=${faceForce.value}")
+    AtkDiag.log(
+      this,
+      "执行界面: 打开 id=${faceId.value} force=${faceForce.value} 静音=${faceMuted.value}",
+    )
 
     val item = loadItem(faceId.value)
     if (item == null) {
@@ -754,7 +767,12 @@ class AtkAlarmActivity : ComponentActivity() {
     // Play the tone immediately, straight from this (foreground, lock-screen) activity. The tone
     // is a process-wide singleton, so it keeps ringing even if this surface is dismissed while the
     // foreground service — and its notification — are still up.
-    AtkAlarmSound.play(this, item)
+    // 3.7.1：静音形态打开（翻转静音 / 解锁已静音的任务）时绝不重新播铃。
+    if (!faceMuted.value) {
+      AtkAlarmSound.play(this, item)
+    } else {
+      AtkDiag.log(this, "执行界面: 静音形态，跳过播铃 id=${faceId.value}")
+    }
     // Start the foreground service for the persistent notification + re-arm. Because it is started
     // FROM a visible activity, the ROM treats it as foreground-started and does not tear it down
     // the way a cold background FGS start gets killed (the original cause of "锁屏听不到闹钟").
@@ -770,36 +788,49 @@ class AtkAlarmActivity : ComponentActivity() {
         AtkAlarmSound.stop()
         stopService(Intent(this@AtkAlarmActivity, AtkAlarmService::class.java))
         AtkEngine(this@AtkAlarmActivity).dismiss(faceId.value)
+        AtkAlarmState.reset()
         finish()
       }
     })
     setContent {
       val id by faceId
+      val muted by faceMuted
       val fitem = remember(id) { loadItem(id) }
       AtkTheme {
         AlarmFace(
           item = fitem,
-          // 静音 only silences the tone; the 执行界面 stays up so 贪睡 / 终止 are still reachable.
-          // The foreground service is stopped with it, otherwise cancelling its notification
-          // from here would leave a "foreground without notification" service behind.
+          muted = muted,
+          // 3.7.1：静音只停声音 / 振动，任务与执行界面都保留（不再 dismiss）。通知前台服务
+          // 切成静音态；界面随即只显示「贪睡 / 终止」，与原版一致。用户解锁后仍能看到这个界面。
           onMute = {
+            faceMuted.value = true
             AtkAlarmSound.stop()
-            stopService(Intent(this@AtkAlarmActivity, AtkAlarmService::class.java))
-            engine.dismiss(id)
+            try {
+              startService(Intent(this@AtkAlarmActivity, AtkAlarmService::class.java).apply {
+                putExtra(AtkAlarmService.EXTRA_ACTION, AtkAlarmService.ACTION_MUTE)
+                putExtra(AtkEngine.EXTRA_ID, id)
+              })
+            } catch (e: Exception) {
+              AtkDiag.log(this@AtkAlarmActivity, "执行界面: 静音通知服务失败 ${e.message}")
+            }
           },
-          onSnooze = {
+          // minutes = 0 表示「使用预设贪睡时间」；>0 是「选择贪睡时间」弹窗里选中的分钟数。
+          onSnooze = { minutes ->
             AtkAlarmSound.stop()
             stopService(Intent(this@AtkAlarmActivity, AtkAlarmService::class.java))
             sendBroadcast(Intent(this, AtkReceiver::class.java).apply {
               action = AtkEngine.ACTION_SNOOZE
               putExtra(AtkEngine.EXTRA_ID, id)
+              if (minutes > 0) putExtra(AtkEngine.EXTRA_SNOOZE_MINUTES, minutes)
             })
+            AtkAlarmState.reset()
             finish()
           },
           onStop = {
             AtkAlarmSound.stop()
             stopService(Intent(this@AtkAlarmActivity, AtkAlarmService::class.java))
             engine.dismiss(id)
+            AtkAlarmState.reset()
             finish()
           },
         )
@@ -875,9 +906,10 @@ class AtkAlarmActivity : ComponentActivity() {
     val newId = intent.getLongExtra(AtkEngine.EXTRA_ID, -1L)
     faceId.value = newId
     faceForce.value = intent.getBooleanExtra(AtkEngine.EXTRA_FORCE, false)
-    AtkDiag.log(this, "执行界面: onNewIntent id=$newId")
+    faceMuted.value = intent.getBooleanExtra(AtkEngine.EXTRA_MUTED, false)
+    AtkDiag.log(this, "执行界面: onNewIntent id=$newId 静音=${faceMuted.value}")
     val item = loadItem(newId) ?: return
-    AtkAlarmSound.play(this, item)
+    if (!faceMuted.value) AtkAlarmSound.play(this, item)
     startAlarmService(newId, faceForce.value)
   }
 
@@ -889,6 +921,7 @@ class AtkAlarmActivity : ComponentActivity() {
       else @Suppress("DEPRECATION") pm.isScreenOn
     } catch (e: Exception) { false }
     AtkDiag.log(this, "执行界面: onResume 已可见 id=${faceId.value} 亮屏=$interactive")
+    AtkAlarmState.faceVisible = true
   }
 
   override fun onDestroy() {
@@ -896,6 +929,7 @@ class AtkAlarmActivity : ComponentActivity() {
     // legitimately keep ringing after the activity is dismissed. The explicit 终止 / 静音 / 贪睡
     // buttons stop it. A 10-minute hard cap in AtkAlarmSound bounds the worst case.
     AtkDiag.log(this, "执行界面: onDestroy id=${faceId.value}")
+    AtkAlarmState.faceVisible = false
     try {
       if (wakeLock?.isHeld == true) wakeLock?.release()
     } catch (e: Exception) {
@@ -905,9 +939,19 @@ class AtkAlarmActivity : ComponentActivity() {
   }
 }
 
-/** The original full-screen 任务执行界面: title strip, date/lunar/clock, task name, 3 round buttons. */
+/**
+ * The original full-screen 任务执行界面: title strip, date/lunar/clock, task name, bottom actions.
+ * 3.7.1：静音后只剩「贪睡 / 终止」两个图标按钮；滑动方式按原版也只有这两个动作；
+ * 手动贪睡 = 选择贪睡时间时弹出时长列表；终止按「终止确认」参数弹出警告。
+ */
 @Composable
-private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, onStop: () -> Unit) {
+private fun AlarmFace(
+  item: AtkItem?,
+  muted: Boolean,
+  onMute: () -> Unit,
+  onSnooze: (Int) -> Unit,
+  onStop: () -> Unit,
+) {
   val now = LocalDateTime.now()
   val solar = LocalDate.now()
   val lunar = try { Lunar.fromSolar(solar) } catch (e: Exception) { null }
@@ -929,6 +973,11 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
   // 3.6.5：翻转感应（act[18]）已移交前台服务 AtkAlarmService 统一监听，本界面不再读取。
   val uiStyle = AtkItem.intOf(item?.actValue(26) ?: "1") // 0 滑动方式 / 1 按钮方式
   val answerProblem = AtkItem.intOf(item?.actValue(21) ?: "0") // 0 关闭 / 1 简单 / 2 稍难
+  // 3.7.1：act[24] 手动贪睡（0 选择贪睡时间 / 1 使用预设贪睡时间），act[16] 终止确认。
+  val handPickSnooze = AtkItem.intOf(item?.actValue(24) ?: "0") == 0
+  val confirmStop = AtkItem.intOf(item?.actValue(16) ?: "1") != 0
+  // 原版「选择贪睡时间」列表是从长到短：45 / 30 / 15 / 10 / 5 / 3 分钟。
+  val snoozeOptions = AtkOptions.SNAP_DUR.asReversed()
   val topText = context
     .getSharedPreferences("atk_settings", Context.MODE_PRIVATE)
     .getString("top_text", "AddinTimer Simplify your life") ?: "AddinTimer Simplify your life"
@@ -936,6 +985,8 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
   var mathOpen by remember { mutableStateOf(false) }
   var mathProblem by remember { mutableStateOf<Pair<String, Int>?>(null) }
   var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+  var snoozePickerOpen by remember { mutableStateOf(false) }
+  var stopConfirmOpen by remember { mutableStateOf(false) }
 
   // 点击 终止 / 静音 时，若开启算术题解锁，先弹题，答对才执行。
   fun doAction(action: () -> Unit) {
@@ -946,6 +997,15 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
     } else {
       action()
     }
+  }
+
+  // 3.7.1：三个动作都先过算术题门控，再按各自参数决定是否弹二级对话框。
+  fun requestMute() = doAction(onMute)
+  fun requestSnooze() = doAction {
+    if (handPickSnooze) snoozePickerOpen = true else onSnooze(0)
+  }
+  fun requestStop() = doAction {
+    if (confirmStop) stopConfirmOpen = true else onStop()
   }
 
   // 3.6.5：翻转感应（act[18]）已移至前台服务 AtkAlarmService 统一处理，使「不亮屏」模式下也能
@@ -1034,7 +1094,8 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
         }
       }
       Spacer(Modifier.weight(1f))
-      // 3.6.4：界面样式（act[26]）。0=滑动方式：左右/上滑触发；1=按钮方式：三个按钮。
+      // 3.7.1：滑动方式按原版只有「贪睡 / 终止」两个选项，中间是可拖动的滑块而不是第三个动作，
+      // 「↑ 静音」已移除。按钮方式在静音后也只剩两个只有图标的按钮。
       if (uiStyle == 0) {
         Box(
           Modifier
@@ -1050,24 +1111,38 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
                 onDrag = { _, delta -> dx += delta.x; dy += delta.y },
                 onDragEnd = {
                   if (dx * dx > dy * dy) {
-                    if (dx > 60) doAction(onStop) else if (dx < -60) doAction(onSnooze)
-                  } else if (dy < -60) {
-                    doAction(onMute)
+                    if (dx > 60) requestStop() else if (dx < -60) requestSnooze()
                   }
                 },
               )
             },
           contentAlignment = Alignment.Center,
         ) {
-          Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("滑动操作", color = Color.White, fontSize = 20.sp)
-            Spacer(Modifier.height(8.dp))
-            Text("← 贪睡    终止 →    ↑ 静音", color = Color(0xFFCFCFCF), fontSize = 15.sp)
+          // 左：贪睡；中：滑块把手；右：终止 —— 与原版滑动条一致，只有两个动作。
+          Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { FaceGlyph("◷") }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+              Box(
+                Modifier
+                  .size(38.dp)
+                  .clip(CircleShape)
+                  .background(Color(0xFF6B6B6B))
+                  .border(1.dp, Color(0xFF9C9C9C), CircleShape),
+                contentAlignment = Alignment.Center,
+              ) {
+                Text("◷", color = Color(0xFFE0E0E0), fontSize = 20.sp)
+              }
+            }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { FaceGlyph("ⓘ") }
           }
+          Text(
+            "← 贪睡    终止 →",
+            color = Color(0xFFCFCFCF),
+            fontSize = 14.sp,
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp),
+          )
         }
       } else {
-        // Three equal, divider-separated buttons with icon + label, matching the build the user
-        // preferred over the icon-only variant.
         Row(
           Modifier
             .fillMaxWidth()
@@ -1075,12 +1150,13 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
             .background(Brush.verticalGradient(listOf(Color(0xFF3A3A3A), Color(0xFF1A1A1A))))
             .border(1.dp, Color(0xFF555555)),
         ) {
-          AlarmFaceButton("♪", "静音", Modifier.weight(1f)) { doAction(onMute) }
+          if (!muted) {
+            AlarmFaceButton("♪", "静音", Modifier.weight(1f), true) { requestMute() }
+            AlarmFaceDivider()
+          }
+          AlarmFaceButton("◷", "贪睡", Modifier.weight(1f), !muted) { requestSnooze() }
           AlarmFaceDivider()
-          // 3.6.5：贪睡同样经过算术题解锁门控，使「算术题解锁」真正生效（三个动作统一走 doAction）。
-          AlarmFaceButton("◷", "贪睡", Modifier.weight(1f)) { doAction(onSnooze) }
-          AlarmFaceDivider()
-          AlarmFaceButton("ⓘ", "终止", Modifier.weight(1f)) { doAction(onStop) }
+          AlarmFaceButton("ⓘ", "终止", Modifier.weight(1f), !muted) { requestStop() }
         }
       }
     }
@@ -1108,6 +1184,31 @@ private fun AlarmFace(item: AtkItem?, onMute: () -> Unit, onSnooze: () -> Unit, 
       )
     }
   }
+
+  // 3.7.1：手动贪睡 = 选择贪睡时间。原版是深色列表，从长到短，点一行立即生效。
+  if (snoozePickerOpen) {
+    AtkDarkListDialog(
+      options = snoozeOptions,
+      onPick = { idx ->
+        snoozePickerOpen = false
+        val n = snoozeOptions[idx].filter { it.isDigit() }.toIntOrNull() ?: 3
+        onSnooze(n.coerceIn(1, 60))
+      },
+      onDismiss = { snoozePickerOpen = false },
+    )
+  }
+
+  // 3.7.1：终止确认（act[16] = 要求确认）。文案与原版一致。
+  if (stopConfirmOpen) {
+    AtkDarkConfirmDialog(
+      title = "警告",
+      body = "终止提醒，不再贪睡？",
+      confirmText = "确定",
+      dismissText = "取消",
+      onConfirm = { stopConfirmOpen = false; onStop() },
+      onDismiss = { stopConfirmOpen = false },
+    )
+  }
 }
 
 /** 3.6.4：生成算术题（act[21]：1=简单 加法；2=稍难 乘法），返回 "题目" 与正确答案。 */
@@ -1130,24 +1231,38 @@ private fun AlarmFaceDivider() {
 }
 
 @Composable
-private fun AlarmFaceButton(symbol: String, label: String, modifier: Modifier, onClick: () -> Unit) {
+private fun AlarmFaceButton(
+  symbol: String,
+  label: String,
+  modifier: Modifier,
+  showLabel: Boolean = true,
+  onClick: () -> Unit,
+) {
   Box(
     modifier.fillMaxHeight().clickable(onClick = onClick),
     contentAlignment = Alignment.Center,
   ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-      Box(
-        Modifier
-          .size(34.dp)
-          .clip(CircleShape)
-          .border(2.dp, AtkSkin.green, CircleShape),
-        contentAlignment = Alignment.Center,
-      ) {
-        Text(symbol, color = AtkSkin.green, fontSize = 20.sp)
+      FaceGlyph(symbol)
+      if (showLabel) {
+        Spacer(Modifier.width(6.dp))
+        Text(label, color = Color(0xFFDDDDDD), fontSize = 14.sp)
       }
-      Spacer(Modifier.width(6.dp))
-      Text(label, color = Color(0xFFDDDDDD), fontSize = 14.sp)
     }
+  }
+}
+
+/** 3.7.1：原版执行界面底部的绿色圆形图标（静音后只剩两个，无文字）。 */
+@Composable
+private fun FaceGlyph(symbol: String) {
+  Box(
+    Modifier
+      .size(34.dp)
+      .clip(CircleShape)
+      .border(2.dp, AtkSkin.green, CircleShape),
+    contentAlignment = Alignment.Center,
+  ) {
+    Text(symbol, color = AtkSkin.green, fontSize = 20.sp)
   }
 }
 

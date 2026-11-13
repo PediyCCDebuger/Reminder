@@ -38,6 +38,24 @@ import android.os.PowerManager
  * start, the activity launch and the re-arm are written to [AtkDiag] so 权限自检 → 诊断日志 can
  * show exactly which link of the chain broke on the device.
  */
+/**
+ * 3.7.1：一次响铃在「前台服务 / 执行界面」之间共享的状态。两者同进程，用进程内单例即可，
+ * 不需要落盘：任务终止 / 贪睡 / 下次触发时都会 reset()。
+ * - [mutedId]：本次响铃已被静音（按钮静音或翻转静音），界面只显示贪睡 / 终止、不再播铃。
+ * - [faceOwned]：用户已主动解锁并把执行界面拉到前台，此后不再因屏幕事件自动暂停。
+ * - [faceVisible]：执行界面当前是否可见，用于诊断。
+ */
+object AtkAlarmState {
+  @Volatile var mutedId: Long = -1L
+  @Volatile var faceOwned = false
+  @Volatile var faceVisible = false
+  fun reset() {
+    mutedId = -1L
+    faceOwned = false
+    faceVisible = false
+  }
+}
+
 class AtkAlarmService : Service() {
 
   companion object {
@@ -45,6 +63,8 @@ class AtkAlarmService : Service() {
     const val ACTION_START = "svc_start"
     const val ACTION_STOP = "svc_stop"
     const val ACTION_SNOOZE = "svc_snooze"
+    /** 3.7.1：静音（只停铃声 / 振动，任务与执行界面保留，等用户点贪睡 / 终止）。 */
+    const val ACTION_MUTE = "svc_mute"
     /** Set by 60 秒后真实触发 so the test fires the chain even on a disabled task. */
     const val EXTRA_FORCE = "svc_force"
     /** 标记本次 service 启动来自「贪睡重响」，用于自动贪睡计数跨重响延续、不重置。 */
@@ -72,6 +92,13 @@ class AtkAlarmService : Service() {
   private var pauseDurMin = 3
   /** 3.7.0：本次响铃开始时的屏幕状态，用于把「第一次按电源键」识别成一次屏幕状态翻转。 */
   private var powerBaselineOn = false
+  /** 3.7.1：用户解锁（USER_PRESENT）监听，独立于电源键监听，静音后也要保留。 */
+  private var unlockReceiver: BroadcastReceiver? = null
+  /** 3.7.1：SCREEN_ON 后等待 USER_PRESENT 的延迟暂停任务。 */
+  private var pauseHandler: Handler? = null
+  private var pendingPauseTask: Runnable? = null
+  /** 3.7.1：本次响铃的屏幕模式，供翻转静音决定是否立即重建执行界面。 */
+  private var lightScreen = false
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -90,6 +117,12 @@ class AtkAlarmService : Service() {
 
     if (action == ACTION_STOP || action == ACTION_SNOOZE) {
       stopEverything(startId)
+      return START_NOT_STICKY
+    }
+    // 3.7.1：执行界面的「静音」按钮只静音、不终止任务。服务保持前台与通知，等用户在界面上
+    // 选择贪睡 / 终止；用户解锁（USER_PRESENT）时再把界面拉到前台。
+    if (action == ACTION_MUTE) {
+      muteOnly(id)
       return START_NOT_STICKY
     }
 
@@ -122,9 +155,23 @@ class AtkAlarmService : Service() {
     acquireWakeLock()
     engine.ensureChannel()
     // 3.6.4: 屏幕模式 = 不点亮屏幕 (act[15]=0) 时，不走全屏 intent、用静默渠道，让屏幕真正不亮。
-    var lightScreen = AtkItem.intOf(item.actValue(15)) != 0
+    lightScreen = AtkItem.intOf(item.actValue(15)) != 0
     // 3.6.5：全局「任务执行时电源模式」= 全唤醒 时，强制点亮屏幕（覆盖 per-timer act[15]）。
     if (engine.globalPowerForceLight()) lightScreen = true
+
+    // 3.7.1：本次响铃是否已挂载过通知。新的一次响铃（含贪睡 / 暂停重响）freshMount=true，
+    // 会清掉上一次的「静音 / 用户已解锁接管」状态；执行界面 onCreate 回弹本服务时则为 false。
+    val notifId = AtkEngine.alarmNotificationId(id)
+    val freshMount = mountedId != id
+    if (freshMount) {
+      AtkAlarmState.reset()
+      engine.cancelAlarmNotification(id)
+      mountedId = id
+    } else if (AtkAlarmState.faceOwned || AtkAlarmState.mutedId == id) {
+      // 界面已交给用户 / 本次响铃已静音：不重复播铃、不重新注册监听、不重新挂自动贪睡。
+      AtkDiag.log(this, "svc: 界面已接管或已静音，跳过重复响铃处理 id=$id")
+      return START_NOT_STICKY
+    }
 
     // 3.6.5：翻转感应（act[18]）由前台服务统一监听，无论是否点亮屏幕都生效。
     flipMode = AtkItem.intOf(item.actValue(18))
@@ -142,12 +189,6 @@ class AtkAlarmService : Service() {
     // background broadcast instead, where Android 12+ treats it as a silent refresh.
     // Cancel first so SystemUI sees a genuinely NEW alert (an update never fires the
     // full-screen intent), and never reuse the 测试执行 / persistent-icon notification id.
-    val notifId = AtkEngine.alarmNotificationId(id)
-    val freshMount = mountedId != id
-    if (freshMount) {
-      engine.cancelAlarmNotification(id)
-      mountedId = id
-    }
     val foregrounded = enterForeground(engine, item, notifId, force, lightScreen)
     AtkDiag.log(
       this,
@@ -171,8 +212,9 @@ class AtkAlarmService : Service() {
     // 锁屏之上。dedupe=true 避免 Activity 自身 onCreate 又回头启动本服务时二次拉起造成闪屏。
     // FSI 通知（上方 startForeground 挂载）仅作兜底：被吞则静默失效，不影响本路径。
     // 3.6.4：屏幕模式 = 不点亮屏幕 (lightScreen=false) 时，不主动拉起执行界面（避免点亮屏幕），
-    // 仅靠本服务的静默通知（V5 渠道）+ 播铃提醒，用户亮屏后点通知即可打开执行界面。
-    if (lightScreen) engine.launchAlarmFace(id, force, dedupe = true)
+    // 仅靠本服务的静默通知（V5 渠道）+ 播铃提醒。3.7.1 起用户主动解锁会由解锁监听拉起界面，
+    // 不必再点通知。
+    if (lightScreen && !AtkAlarmState.faceOwned) engine.launchAlarmFace(id, force, dedupe = true)
     AtkDiag.log(this, "svc: 已直接拉起执行界面 id=$id（FSI 仅兜底，全屏权限=${engine.canUseFullScreenIntent()}）")
 
     runCatching { AtkStore(this).log(id, 1, item.name) }
@@ -187,15 +229,19 @@ class AtkAlarmService : Service() {
     val snapIdx = AtkItem.intOf(item.actValue(13)).coerceIn(0, AtkOptions.SNAP_DUR.lastIndex)
     snapDurMin = snapMinutes(AtkOptions.SNAP_DUR[snapIdx]) // 预设时间（存的是选项索引）
     pauseDurMin = engine.pauseMinutes(item) // 3.6.9：暂停提醒的恢复时长（act[27]）
-    // 3.7.0：记录响铃开始时的屏幕状态。此前「不点亮屏幕」模式把 SCREEN_ON 当成「只是亮屏看界面」，
-    // 要再按一次灭屏才暂停；与「点亮屏幕」模式「按一次即暂停」不一致。现在统一为「第一次屏幕状态
-    // 翻转 = 按下电源键」，两种模式、首次响铃与暂停后重响都是按一次即生效。
+    // 3.7.1：记录响铃开始时的屏幕状态作为基线。屏幕状态翻转仍是电源键的代理，但 SCREEN_ON
+    // （亮屏）要等 1.1 秒判断是否随后解锁：解锁则交给执行界面，不解锁才按设置暂停。
     powerBaselineOn = try {
       (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
     } catch (e: Exception) {
       lightScreen
     }
-    if (powerStyle != -1) registerPowerReceiver(powerStyle, id, lightScreen, powerBaselineOn)
+    if (powerStyle != -1 && !AtkAlarmState.faceOwned) {
+      registerPowerReceiver(powerStyle, id, lightScreen, powerBaselineOn)
+    }
+    // 3.7.1：用户主动解锁屏幕时把执行界面交给用户（见 [onUserUnlocked]）。与电源键监听分开，
+    // 静音后电源键监听已注销，但解锁监听仍在，仍能把「只剩贪睡 / 终止」的界面拉起来。
+    registerUnlockReceiver(id)
     if (snapRepeat > 0) {
       // 真正触发（fromSnooze=false）时重置自动贪睡次数，开启新一轮；贪睡重响（fromSnooze=true）
       // 时保留已递减的次数，避免无限贪睡或次日失效。
@@ -250,14 +296,12 @@ class AtkAlarmService : Service() {
 
   /**
    * 3.6.5：电源键按下监听，以「屏幕状态变化」作为电源键代理。
-   * 3.7.0 统一行为：本次响铃期间**第一次真正的屏幕状态翻转**即视为按下电源键，与屏幕模式、
-   * 是首次响铃还是暂停后重响无关，按一次就生效：
-   * - 「点亮屏幕」模式：响铃时屏幕为亮，按电源键 → SCREEN_OFF → 暂停并息屏；
-   * - 「不点亮屏幕」模式：响铃时屏幕为灭，按电源键 → SCREEN_ON → 同样暂停（不再需要先亮屏再按第二次）。
-   * 屏幕上注册瞬间的同向事件（执行界面自动亮屏、通知唤醒屏幕）与响铃最初 600ms 内的自动亮/灭屏
-   * 都会被忽略，不会误判为按键；忽略时会同步基线，保证下一次真实按键仍能正确翻转。
-   * 由于暂停现在是「挂 N 分钟后继续」而非 dismiss（见 [pauseOnly]），亮屏/解锁也不会终止任务。
-   * 「暂停提醒」与「自动贪睡」分别按 act[25] 处理。
+   * 3.7.1 关键修正：区分「按电源键」与「按亮后解锁」。
+   * - SCREEN_OFF（灭屏）一定是按键 → 立即按 act[25] 暂停 / 贪睡；
+   * - SCREEN_ON（亮屏）可能是「按亮锁屏看一眼」，也可能是「按亮后马上滑动解锁」。
+   *   SCREEN_ON 先挂 1.1 秒延迟；若期间收到 USER_PRESENT（真正解锁），[onUserUnlocked] 会取消
+   *   这次暂停并把执行界面交给用户。这就修掉了「暂停重响后解锁屏幕又触发一次暂停、过一会后台又响」。
+   * 注册瞬间的同向事件与响铃最初 600ms 的自动亮/灭屏仍按噪声忽略。
    */
   private fun registerPowerReceiver(
     powerStyle: Int,
@@ -269,6 +313,20 @@ class AtkAlarmService : Service() {
     unregisterPowerReceiver()
     var screenOn = baselineOn
     val armedAt = System.currentTimeMillis()
+    fun applyPowerAction() {
+      cancelPendingPause()
+      unregisterPowerReceiver()
+      if (powerStyle == 1) {
+        // 自动贪睡：停止响铃并按参数里的贪睡时长挂重响。
+        // 3.6.8：先停服务（dismiss 会取消挂起的贪睡闹钟），再挂本次贪睡，避免被 dismiss 取消。
+        AtkAlarmSound.stop()
+        stopEverything(startIdForSnooze())
+        AtkEngine(this).armSnooze(id, snapDurMin)
+      } else {
+        // 3.6.9：暂停提醒——本次响铃延后「暂停时长」后继续，绝不 dismiss。
+        pauseOnly(id)
+      }
+    }
     powerReceiver = object : BroadcastReceiver() {
       override fun onReceive(c: Context?, intent: Intent?) {
         val a = intent?.action ?: return
@@ -283,21 +341,16 @@ class AtkAlarmService : Service() {
         }
         AtkDiag.log(
           this@AtkAlarmService,
-          "svc: 电源键按下（${if (nowOn) "亮屏" else "灭屏"}）powerStyle=$powerStyle " +
+          "svc: 屏幕变化（${if (nowOn) "亮屏" else "灭屏"}）powerStyle=$powerStyle " +
             "点亮屏幕=$lightScreen 基线=${if (baselineOn) "亮" else "灭"} id=$id",
         )
-        // 3.7.0：不再于此拉起执行界面——那会把屏幕点亮又立刻随暂停释放唤醒锁而熄灭，
-        // 就是用户反馈的「屏幕亮起马上关闭」。现在只静默暂停，屏幕状态完全交给硬件按键本身。
-        unregisterPowerReceiver()
-        if (powerStyle == 1) {
-          // 自动贪睡：停止响铃并按参数里的贪睡时长挂重响。
-          // 3.6.8：先停服务（dismiss 会取消挂起的贪睡闹钟），再挂本次贪睡，避免被 dismiss 取消。
-          AtkAlarmSound.stop()
-          stopEverything(startIdForSnooze())
-          AtkEngine(this@AtkAlarmService).armSnooze(id, snapDurMin)
+        if (!nowOn) {
+          // 灭屏不可能是解锁的前奏，立即按电源键处理。
+          applyPowerAction()
         } else {
-          // 3.6.9：暂停提醒——本次响铃延后「暂停时长」后继续，绝不 dismiss。
-          pauseOnly(id)
+          // 亮屏：等 1.1 秒看用户是否继续解锁；解锁则由 onUserUnlocked 取消本次暂停。
+          AtkDiag.log(this@AtkAlarmService, "svc: 亮屏，等待是否解锁 id=$id")
+          schedulePendingPause { applyPowerAction() }
         }
       }
     }
@@ -316,6 +369,88 @@ class AtkAlarmService : Service() {
   }
 
   /**
+   * 3.7.1：用户真正解锁屏幕（USER_PRESENT）。原版此时会直接把任务执行界面呈现出来，让用户选
+   * 贪睡 / 终止；3.7.0 把解锁当成了「按电源键」，于是又暂停一次、过 N 分钟在后台重响。
+   * 现在取消待生效的亮屏暂停、注销电源键监听（界面已交给用户），并拉起执行界面。若本次响铃
+   * 已被静音（按钮静音 / 翻转静音），界面以「只剩贪睡 / 终止」的形态打开且不重新播铃。
+   */
+  private fun onUserUnlocked(id: Long) {
+    cancelPendingPause()
+    AtkAlarmState.faceOwned = true
+    unregisterPowerReceiver()
+    val muted = AtkAlarmState.mutedId == id
+    AtkDiag.log(
+      this,
+      "svc: 用户解锁，交给执行界面 id=$id 静音=$muted 界面已可见=${AtkAlarmState.faceVisible}",
+    )
+    if (!muted && AtkAlarmState.faceVisible) {
+      // 界面本来就亮在前台，重建只会闪一下；此处只需保证不再自动暂停。
+      AtkDiag.log(this, "svc: 执行界面已在前台，跳过重复拉起 id=$id")
+      return
+    }
+    AtkEngine(this).launchAlarmFace(id, false, muted = muted, dedupe = false)
+  }
+
+  private fun registerUnlockReceiver(id: Long) {
+    unregisterUnlockReceiver()
+    unlockReceiver = object : BroadcastReceiver() {
+      override fun onReceive(c: Context?, intent: Intent?) {
+        if (intent?.action != Intent.ACTION_USER_PRESENT) return
+        val target = if (currentId >= 0) currentId else AtkAlarmState.mutedId
+        if (target < 0) return
+        onUserUnlocked(target)
+      }
+    }
+    try {
+      registerReceiver(unlockReceiver, IntentFilter(Intent.ACTION_USER_PRESENT))
+      AtkDiag.log(this, "svc: 解锁监听已注册 id=$id")
+    } catch (e: Exception) {
+      AtkDiag.log(this, "svc: 解锁监听注册失败 ${e.message}")
+    }
+  }
+
+  private fun unregisterUnlockReceiver() {
+    try { unlockReceiver?.let { unregisterReceiver(it) } } catch (e: Exception) { }
+    unlockReceiver = null
+  }
+
+  private fun schedulePendingPause(action: () -> Unit) {
+    cancelPendingPause()
+    val h = Handler(Looper.getMainLooper())
+    val task = Runnable {
+      pendingPauseTask = null
+      action()
+    }
+    pauseHandler = h
+    pendingPauseTask = task
+    h.postDelayed(task, 1100L)
+  }
+
+  private fun cancelPendingPause() {
+    try { pendingPauseTask?.let { pauseHandler?.removeCallbacks(it) } } catch (e: Exception) { }
+    pendingPauseTask = null
+    pauseHandler = null
+  }
+
+  /**
+   * 3.7.1：静音 ≠ 终止。只停铃声 / 振动，注销翻转、电源键与自动贪睡（避免静音后又自动响），
+   * 但**不 dismiss、不 stopSelf**：任务仍在，前台服务与解锁监听保留，用户解锁后能看到「只剩
+   * 贪睡 / 终止」的执行界面；点贪睡 / 终止才真正结束。
+   */
+  private fun muteOnly(id: Long) {
+    currentId = id
+    AtkAlarmState.mutedId = id
+    AtkAlarmSound.stop()
+    unregisterFlipSensor()
+    unregisterPowerReceiver()
+    cancelPendingPause()
+    cancelAutoSnooze()
+    // 服务若因静音才被拉起（前台服务此前已被系统回收），这里也要补上解锁监听。
+    registerUnlockReceiver(id)
+    AtkDiag.log(this, "svc: 已静音，保留任务与执行界面 id=$id")
+  }
+
+  /**
    * 3.6.9：暂停提醒。与 [stopEverything] 的关键区别是**不调用 dismiss**，因此本次任务的排程、
    * 自动贪睡次数都保留，且挂上「暂停 N 分钟后继续执行」的闹钟。用户手动终止 / 贪睡时
    * AtkEngine.dismiss 会顺带取消这个闹钟，不会关掉后又自动响。
@@ -325,6 +460,8 @@ class AtkAlarmService : Service() {
     AtkAlarmSound.stop()
     unregisterFlipSensor()
     unregisterPowerReceiver()
+    unregisterUnlockReceiver()
+    cancelPendingPause()
     cancelAutoSnooze()
     releaseWakeLock()
     if (foreground) {
@@ -454,7 +591,8 @@ class AtkAlarmService : Service() {
 
   /**
    * 3.6.5：在前台服务（常驻）注册重力 / 加速度传感器，监听翻转（屏幕朝下 z<-7）。翻转后：
-   * flipMode==1 → 贪睡（与执行界面「贪睡」一致）；flipMode==2 → 静音（停止响铃并 dismiss）。
+   * flipMode==1 → 贪睡（与执行界面「贪睡」一致）；flipMode==2 → 静音（3.7.1 起等同界面上的
+   * 「静音」，只停声音、任务与执行界面保留，见 [flipMute] / [muteOnly]）。
    * 放在服务而非 Activity，是因为「不点亮屏幕」模式下 Activity 不会被创建，此前翻转失效。
    */
   private fun registerFlipSensor(id: Long) {
@@ -502,19 +640,29 @@ class AtkAlarmService : Service() {
     stopSelf()
   }
 
+  /**
+   * 3.7.1：翻转静音不再是「停止任务」。[muteOnly] 保留任务、前台服务与解锁监听，用户解锁后
+   * 由 [onUserUnlocked] 拉起「只剩贪睡 / 终止」的执行界面。点亮屏幕模式下界面本来就在前台，
+   * 直接重建为静音形态；不点亮屏幕模式下不主动拉起，等用户解锁（不主动点亮屏幕）。
+   */
   private fun flipMute(id: Long) {
-    AtkDiag.log(this, "svc: 翻转静音 id=$id")
-    unregisterFlipSensor()
-    AtkAlarmSound.stop()
-    runCatching { AtkEngine(this).dismiss(id) }
-    stopSelf()
+    AtkDiag.log(this, "svc: 翻转静音（不终止任务）id=$id 点亮屏幕=$lightScreen")
+    muteOnly(id)
+    if (lightScreen) {
+      AtkEngine(this).launchAlarmFace(id, false, muted = true, dedupe = false)
+    } else {
+      AtkDiag.log(this, "svc: 不点亮屏幕模式，等待用户解锁后进入执行界面 id=$id")
+    }
   }
 
   private fun stopEverything(startId: Int) {
     AtkAlarmSound.stop()
     unregisterFlipSensor()
     unregisterPowerReceiver()
+    unregisterUnlockReceiver()
+    cancelPendingPause()
     cancelAutoSnooze()
+    AtkAlarmState.reset()
     releaseWakeLock()
     if (foreground) {
       try {
@@ -566,6 +714,8 @@ class AtkAlarmService : Service() {
     AtkDiag.log(this, "svc: onDestroy（前台=$foreground, 仍持唤醒锁=${wakeLock?.isHeld == true}）")
     unregisterFlipSensor()
     unregisterPowerReceiver()
+    unregisterUnlockReceiver()
+    cancelPendingPause()
     cancelAutoSnooze()
     releaseWakeLock()
     if (foreground) {

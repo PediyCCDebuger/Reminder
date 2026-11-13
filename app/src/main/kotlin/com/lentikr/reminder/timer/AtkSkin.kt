@@ -531,6 +531,80 @@ fun AtkMessageDialog(
   }
 }
 
+/**
+ * 3.7.1：原版「手动选择贪睡时间」弹窗 —— 深色面板、白色居中选项、细分隔线，点一行立即选择，
+ * 没有标题栏和底部按钮。选项由调用方按「从长到短」传入（45 / 30 / 15 / 10 / 5 / 3 分钟）。
+ */
+@Composable
+fun AtkDarkListDialog(
+  options: List<String>,
+  onPick: (Int) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  Dialog(onDismissRequest = onDismiss) {
+    Column(
+      Modifier
+        .fillMaxWidth()
+        .background(Color(0xFF101010))
+        .border(1.dp, Color(0xFF8A8A8A)),
+    ) {
+      options.forEachIndexed { index, option ->
+        Box(
+          Modifier
+            .fillMaxWidth()
+            .heightIn(min = 52.dp)
+            .clickable { onPick(index) },
+          contentAlignment = Alignment.Center,
+        ) {
+          Text(option, color = Color.White, fontSize = 18.sp)
+        }
+        if (index != options.lastIndex) {
+          Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF4A4A4A)))
+        }
+      }
+    }
+  }
+}
+
+/** 3.7.1：原版「终止确认」警告框 —— 深色面板、白色标题与正文、底部银灰「确定 / 取消」。 */
+@Composable
+fun AtkDarkConfirmDialog(
+  title: String,
+  body: String,
+  confirmText: String,
+  dismissText: String,
+  onConfirm: () -> Unit,
+  onDismiss: () -> Unit,
+) {
+  Dialog(onDismissRequest = onDismiss) {
+    Column(
+      Modifier
+        .fillMaxWidth()
+        .background(Color(0xFF101010))
+        .border(1.dp, Color(0xFF8A8A8A)),
+    ) {
+      Text(
+        title,
+        color = Color.White,
+        fontSize = 20.sp,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+      )
+      Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF4A4A4A)))
+      Text(
+        body,
+        color = Color.White,
+        fontSize = 17.sp,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 18.dp),
+      )
+      Row(Modifier.fillMaxWidth().background(Color(0xFFD2D2D2)).padding(6.dp)) {
+        AtkPlainButton(confirmText, Modifier.weight(1f), onConfirm)
+        Spacer(Modifier.width(6.dp))
+        AtkPlainButton(dismissText, Modifier.weight(1f), onDismiss)
+      }
+    }
+  }
+}
+
 /** Original AddinTimer dialogs use a plain black caption strip with white regular-weight text. */
 @Composable
 fun AtkDialogTitle(text: String) {

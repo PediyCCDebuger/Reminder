@@ -36,6 +36,10 @@ class AtkEngine(private val context: Context) {
     const val EXTRA_AT = "triggerAt"
     /** Set by 60 秒后真实触发 so the fired 执行界面 forces the ring chain on a disabled task. */
     const val EXTRA_FORCE = "force"
+    /** 3.7.1：执行界面以「已静音」形态打开（只剩贪睡 / 终止，且不重新播铃）。 */
+    const val EXTRA_MUTED = "atk_muted"
+    /** 3.7.1：手动贪睡「选择贪睡时间」选中的分钟数；0 / 缺省表示用「预设时间」。 */
+    const val EXTRA_SNOOZE_MINUTES = "atk_snooze_minutes"
     const val CHANNEL = "addintimer_alarm"
     /**
      * The real firing notification. IMPORTANCE_HIGH + full-screen intent is the only supported way
@@ -576,7 +580,12 @@ class AtkEngine(private val context: Context) {
    * Activity -> service -> Activity cycle cannot keep re-launching the face. Manual 测试执行
    * leaves it false, so a user-initiated test is never swallowed by a recent alarm.
    */
-  fun launchAlarmFace(id: Long, force: Boolean = false, dedupe: Boolean = false) {
+  fun launchAlarmFace(
+    id: Long,
+    force: Boolean = false,
+    dedupe: Boolean = false,
+    muted: Boolean = false,
+  ) {
     if (dedupe) {
       val now = System.currentTimeMillis()
       if (now - lastFaceLaunchAt < FACE_LAUNCH_GAP_MS) {
@@ -589,10 +598,11 @@ class AtkEngine(private val context: Context) {
       addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
       putExtra(EXTRA_ID, id)
       if (force) putExtra(EXTRA_FORCE, true)
+      if (muted) putExtra(EXTRA_MUTED, true)
     }
     try {
       context.startActivity(i)
-      AtkDiag.log(context, "执行界面: 已请求直接启动 force=$force")
+      AtkDiag.log(context, "执行界面: 已请求直接启动 force=$force 静音=$muted")
     } catch (e: Exception) {
       // Belt and braces only: the full-screen notification already asked SystemUI to open the
       // same surface. A blocked direct launch costs nothing here.
