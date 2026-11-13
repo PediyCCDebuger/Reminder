@@ -738,6 +738,8 @@ private fun ParamTab(draft: AtkItem, change: (() -> Unit) -> Unit, onMessage: (S
       draft.ensureAlarmAct()
       var lastSection = ""
       for (spec in AlarmSpec.FIELDS) {
+        // 3.6.9：「暂停时长」只在「电源键按下」= 暂停提醒 (act[25]=0) 时有意义，选自动贪睡时隐藏。
+        if (spec.index == 27 && AtkItem.intOf(draft.actValue(25)) != 0) continue
         if (spec.section != lastSection) {
           AtkSection(spec.section)
           lastSection = spec.section

@@ -58,6 +58,8 @@ object AtkOptions {
   val BROADCAST_CONTENT = listOf("开始音", "年月日", "星期", "上下午", "时分")
   val HAND_SNAP = listOf("选择贪睡时间", "使用预设贪睡时间")
   val POWER_STYLE = listOf("暂停提醒", "自动贪睡")
+  // 3.6.9：电源键按下 = 暂停提醒时，暂停多久后自动继续执行本次任务（不再是「一停了之」）。
+  val PAUSE_DUR = listOf("1分钟", "2分钟", "3分钟", "5分钟", "10分钟", "15分钟", "30分钟")
   val UI_STYLE = listOf("滑动方式", "按钮方式")
 
   val KINDS = listOf(
@@ -119,6 +121,10 @@ object AlarmSpec {
     ActSpec(26, "界面样式", FieldKind.SELECT, AtkOptions.UI_STYLE, SECTION_UI),
     ActSpec(21, "算术题解锁", FieldKind.SELECT, AtkOptions.ANSWER_PROBLEM, SECTION_UI),
     ActSpec(25, "电源键按下", FieldKind.SELECT, AtkOptions.POWER_STYLE, SECTION_UI),
+    // 3.6.9：新增的扩展字段（索引 27，超出原版 27 个 ALARM 参数）。原版读 param 时按固定下标取
+    // 前 27 个，多出的这一项会被忽略，因此导出/导入旧数据不丢字段；本 App 解析时保留全部字段。
+    // 仅当 act[25] 选中「暂停提醒」时显示（见 AtkEditUi）。
+    ActSpec(27, "暂停时长", FieldKind.SELECT, AtkOptions.PAUSE_DUR, SECTION_UI),
     ActSpec(24, "手动贪睡", FieldKind.SELECT, AtkOptions.HAND_SNAP, SECTION_UI),
     ActSpec(16, "终止确认", FieldKind.SELECT, AtkOptions.TIP_CLOSE, SECTION_UI),
     // 其他设置
@@ -162,6 +168,7 @@ object AlarmSpec {
     "0", // 24 s
     "0", // 25 r
     "0", // 26 x
+    "2", // 27 扩展：暂停时长索引（默认「3分钟」），旧数据缺此项时 AtkEngine.pauseMinutes 兜底为 3 分钟
   )
 }
 

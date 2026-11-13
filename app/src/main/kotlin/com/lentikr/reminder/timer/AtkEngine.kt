@@ -349,6 +349,59 @@ class AtkEngine(private val context: Context) {
     return n.coerceIn(1, 60)
   }
 
+  /**
+   * 3.6.9：「暂停时长」(act[27]，扩展字段) 解析为分钟数。旧数据没有第 28 个字段时兜底为 3 分钟，
+   * 与默认选项一致，避免升级后老任务的暂停行为突变。
+   */
+  fun pauseMinutes(item: AtkItem): Int {
+    val raw = item.act.getOrNull(27)?.takeIf { it.isNotBlank() } ?: "2"
+    val idx = AtkItem.intOf(raw).coerceIn(0, AtkOptions.PAUSE_DUR.lastIndex)
+    val n = AtkOptions.PAUSE_DUR[idx].filter { it.isDigit() }.toIntOrNull() ?: 3
+    return n.coerceIn(1, 60)
+  }
+
+  /** 暂停后继续执行的 PendingIntent。requestCode 与 fire / snooze 错开，避免互相覆盖。 */
+  private fun pauseResumeIntent(id: Long): PendingIntent =
+    PendingIntent.getBroadcast(
+      context, (id * 7 + 13).toInt(),
+      Intent(context, AtkReceiver::class.java).apply {
+        this.action = "app.lentikr.reminder.ATK_PAUSE_RESUME"
+        putExtra(EXTRA_ID, id)
+      },
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
+  /**
+   * 3.6.9：电源键「暂停提醒」时挂 N 分钟后的「继续执行」闹钟。用 setAlarmClock 保证深睡 / Doze
+   * 下也能准时恢复；不 dismiss、不取消任务的下一次排程——暂停只是把本次响铃推迟，而非终止任务。
+   */
+  fun armPauseResume(id: Long, minutes: Int) {
+    val m = minutes.coerceIn(1, 60)
+    val pi = pauseResumeIntent(id)
+    val at = System.currentTimeMillis() + m * 60 * 1000L
+    val aci = AlarmManager.AlarmClockInfo(at, pi)
+    try {
+      alarms.setAlarmClock(aci, pi)
+    } catch (e: SecurityException) {
+      try {
+        alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+      } catch (e2: SecurityException) {
+        alarms.set(AlarmManager.RTC_WAKEUP, at, pi)
+      }
+    }
+    AtkDiag.log(context, "暂停: 已挂 ${m} 分钟后继续执行 id=$id")
+  }
+
+  /** 用户手动终止 / 贪睡时清掉挂起的「暂停后继续」，避免任务被关掉后又自动响。 */
+  fun cancelPauseResume(id: Long) {
+    try {
+      alarms.cancel(pauseResumeIntent(id))
+      AtkDiag.log(context, "暂停: 已取消挂起的继续 id=$id")
+    } catch (e: Exception) {
+      AtkDiag.log(context, "暂停: 取消继续失败 id=$id ${e.message}")
+    }
+  }
+
   /** Next fire time in epoch millis, or 0 when the rule yields nothing. Never throws. */
   fun nextMillis(item: AtkItem, after: LocalDateTime = LocalDateTime.now()): Long {
     try {
@@ -801,6 +854,8 @@ class AtkEngine(private val context: Context) {
     cancelAlarmNotification(id)
     // 3.6.8：清除挂起的贪睡重响闹钟，使暂停 / 关闭后不会到点又自动响。
     cancelSnooze(id)
+    // 3.6.9：清除挂起的「暂停后继续」，用户既然已结束本次执行就不该再自动响。
+    cancelPauseResume(id)
   }
 
   /** Whether Android still lets this app launch a full-screen Activity over the keyguard. */

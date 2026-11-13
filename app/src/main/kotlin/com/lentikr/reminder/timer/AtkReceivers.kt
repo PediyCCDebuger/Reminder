@@ -94,6 +94,9 @@ object AtkAlarmSound {
   private var player: MediaPlayer? = null
   private var ringtone: Ringtone? = null
   private var vibrator: Vibrator? = null
+  // 3.6.9：振动是否已在本次响铃中发起。后台发起的振动可能被 OEM 静默丢弃，前台服务进入
+  // 前台后会强制补发一次（见 AtkAlarmService）。
+  private var vibrationRunning = false
   private var handler: Handler? = null
   private var rampTask: Runnable? = null
   private var currentId = -1L
@@ -153,6 +156,10 @@ object AtkAlarmSound {
     val itemId = item?.id ?: -1L
     if (!force && active && currentId == itemId) {
       AtkDiag.log(app, "音: 任务 $itemId 正在播放，跳过重复调用")
+      // 3.6.9：铃声虽已在响，振动却可能没起来——第一次 play() 发生在广播接收器里，此时前台服务
+      // 尚未 startForeground，部分 ROM（ColorOS/一加）会静默丢弃后台应用发起的振动。后续 服务 /
+      // 执行界面 再次调用 play() 时，在这里于前台上下文补发一次振动。
+      ensureVibration(app, item, vibrateOverride)
       return
     }
     stop()
@@ -341,11 +348,32 @@ object AtkAlarmSound {
     streamRampActive = false
   }
 
+  /**
+   * 3.6.9：确保「本次响铃」确实带振动。第一次 play() 来自后台广播，部分 ROM 会静默丢弃后台
+   * 振动；前台服务进入前台后以 force=true 再发一次，即可覆盖所有屏幕模式（含「不点亮屏幕」）。
+   * force=false 时只在尚未发起时补，避免反复 cancel 造成振动断续、或覆盖全局振动模式。
+   */
+  fun ensureVibration(context: Context, item: AtkItem?, vibrateOverride: Int = -1, force: Boolean = false) {
+    if (!active) return
+    val desired = if (vibrateOverride >= 0) vibrateOverride
+      else (item?.let { AtkItem.intOf(it.actValue(12)) } ?: 1)
+    if (desired <= 0) return
+    // 只要已经发起过就不再重启：后续 服务 / 执行界面 的 play() 不带 override，若在这里比较
+    // 模式会把广播里按全局「伴随振动模式」启动的振动误判成需要覆盖。强制补发（force）例外。
+    if (!force && vibrationRunning) return
+    try { vibrator?.cancel() } catch (e: Exception) { }
+    vibrationRunning = false
+    startVibration(context.applicationContext, item, if (vibrateOverride >= 0) vibrateOverride else null)
+  }
+
   /** 振动类型 (act[12]): 0 无振动 / 1 跟随音乐起停 / 2..4 音乐前振动 10..30 秒.
-   *  override >=0 时为全局「伴随振动模式」覆盖（无振动=0 / 短振动=1 / 长振动=4）。 */
+   *  override >=0 时为全局「伴随振动模式」覆盖（短振动=1 / 长振动=4）。 */
   private fun startVibration(context: Context, item: AtkItem?, override: Int? = null) {
     val mode = override ?: (item?.let { AtkItem.intOf(it.actValue(12)) } ?: 1)
-    if (mode <= 0) return
+    if (mode <= 0) {
+      AtkDiag.log(context, "音: 振动未启用 mode=$mode")
+      return
+    }
     val vib: Vibrator = try {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         (context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager).defaultVibrator
@@ -354,12 +382,18 @@ object AtkAlarmSound {
         context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
       }
     } catch (e: Exception) {
+      AtkDiag.log(context, "音: 取振动器失败 ${e.javaClass.simpleName}: ${e.message}")
       return
     }
     try {
-      if (!vib.hasVibrator()) return
+      if (!vib.hasVibrator()) {
+        AtkDiag.log(context, "音: 设备无振动器")
+        return
+      }
       if (mode == 1) {
-        vib.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 700, 500, 700, 900), 0))
+        // 标准成对波形：delay=0 / on=700ms / off=500ms，从索引 1 循环。此前用奇数长度 5 项 +
+        // repeat=0，部分 OEM 会静默忽略，正是「只有铃声没有振动」的诱因之一。
+        vib.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 700, 500), 1))
       } else {
         // 10 s per step: five 2-second cycles (450 ms on / 550 ms off).
         val cycles = mode * 5
@@ -369,7 +403,10 @@ object AtkAlarmSound {
         vib.vibrate(VibrationEffect.createWaveform(pattern, -1))
       }
       vibrator = vib
+      vibrationRunning = true
+      AtkDiag.log(context, "音: 振动已启动 mode=$mode")
     } catch (e: Exception) {
+      AtkDiag.log(context, "音: 振动启动失败 ${e.javaClass.simpleName}: ${e.message}")
     }
   }
 
@@ -399,6 +436,7 @@ object AtkAlarmSound {
     ringtone = null
     try { vibrator?.cancel() } catch (e: Exception) { }
     vibrator = null
+    vibrationRunning = false
     releaseCpu()
     active = false
     currentId = -1L
@@ -505,6 +543,24 @@ class AtkReceiver : BroadcastReceiver() {
           startAlarmService(context, engine, id, false, fromSnooze = true)
           AtkDiag.log(context, "全屏通知: 已交给前台服务挂载（贪睡）id=$id")
           store.log(id, 2, item.name + " 贪睡")
+        }
+      }
+
+      // 3.6.9：电源键「暂停提醒」到期——按设置暂停 N 分钟后重新执行本次任务（声音 + 振动 +
+      // 通知 / 执行界面），而不是把任务停掉。与贪睡重响共用同一条触发链。
+      "app.lentikr.reminder.ATK_PAUSE_RESUME" -> {
+        val item = if (id >= 0) store.get(id) else null
+        AtkDiag.log(context, "暂停结束，继续执行 id=$id 任务=${item?.name}")
+        if (item != null && item.enabled) {
+          engine.ensureChannel()
+          AtkAlarmSound.play(
+            context, item,
+            delayMs = engine.globalWaitMs(),
+            vibrateOverride = engine.globalVibrate(),
+          )
+          startAlarmService(context, engine, id, false, fromSnooze = true)
+          AtkDiag.log(context, "全屏通知: 暂停结束后已重新挂载 id=$id")
+          store.log(id, 3, item.name + " 暂停后继续")
         }
       }
 

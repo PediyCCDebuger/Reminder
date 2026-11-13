@@ -22,11 +22,15 @@ object AtkDiag {
   private const val SETTINGS = "atk_settings"
   private const val DEBUG_KEY = "debug"
 
-  /** The 调试 switch in 权限自检 gates ALL logging. OFF means the chain never writes a line. */
+  /**
+   * The 调试 switch in 权限自检 gates ALL logging. OFF means the chain never writes a line.
+   * 3.6.9：系统设置里新增的「执行日志」总开关同样作为闸门——关闭后触发日志与执行记录都不再写入，
+   * 需要排查「到点不响」时把两个开关都打开即可。两个开关是 AND 关系，互不冲突。
+   */
   fun isDebug(context: Context): Boolean =
     try {
-      context.applicationContext.getSharedPreferences(SETTINGS, Context.MODE_PRIVATE)
-        .getBoolean(DEBUG_KEY, true)
+      val sp = context.applicationContext.getSharedPreferences(SETTINGS, Context.MODE_PRIVATE)
+      sp.getBoolean(DEBUG_KEY, true) && sp.getString("exec_log", "开启") != "关闭"
     } catch (e: Exception) {
       true
     }

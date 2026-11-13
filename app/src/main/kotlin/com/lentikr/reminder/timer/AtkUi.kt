@@ -903,6 +903,8 @@ private val GENERAL_SETTINGS = listOf(
   SettingDef("notify_icon", "通知栏图标", listOf("应用程序图标", "定时器状态图标", "不显示"), "应用程序图标"),
   SettingDef("icon_click", "点击定时器图标", listOf("操作菜单", "编辑定时器", "执行任务"), "操作菜单"),
   SettingDef("sort", "任务排序方式", listOf("按执行时间", "按创建时间", "按名称"), "按执行时间"),
+  // 3.6.9：执行日志总开关。关闭后 AtkStore.log 不再写 actlog，AtkDiag 也不再记触发日志。
+  SettingDef("exec_log", "执行日志", listOf("开启", "关闭"), "开启"),
   SettingDef("log_keep", "执行日志保存期限", listOf("3天", "一星期", "一个月", "三个月", "半年", "一年", "永久"), "一个月"),
 )
 private val TIMER_SETTINGS = listOf(

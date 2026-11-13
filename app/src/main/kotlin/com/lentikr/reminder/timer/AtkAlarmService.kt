@@ -68,6 +68,8 @@ class AtkAlarmService : Service() {
   private var autoSnoozeHandler: Handler? = null
   private var autoSnoozeTask: Runnable? = null
   private var snapDurMin = 10
+  /** 3.6.9：电源键「暂停提醒」的暂停时长（分钟），来自任务扩展参数 act[27]。 */
+  private var pauseDurMin = 3
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -129,7 +131,7 @@ class AtkAlarmService : Service() {
     // Play the tone (idempotent: the activity that launched this service already started it, so
     // this is normally a no-op). Keeping the tone in one process-wide singleton means it survives
     // either component being torn down.
-    AtkAlarmSound.play(this, item)
+    AtkAlarmSound.play(this, item, vibrateOverride = engine.globalVibrate())
 
     // 3.1.0 DECISIVE STEP: mount the full-screen notification as THIS foreground service's
     // notification, exactly like SunriseAlarm's
@@ -139,7 +141,8 @@ class AtkAlarmService : Service() {
     // Cancel first so SystemUI sees a genuinely NEW alert (an update never fires the
     // full-screen intent), and never reuse the 测试执行 / persistent-icon notification id.
     val notifId = AtkEngine.alarmNotificationId(id)
-    if (mountedId != id) {
+    val freshMount = mountedId != id
+    if (freshMount) {
       engine.cancelAlarmNotification(id)
       mountedId = id
     }
@@ -149,6 +152,12 @@ class AtkAlarmService : Service() {
       "全屏通知: startForeground 已挂载 id=$id notif=$notifId 前台=$foregrounded " +
         "全屏权限=${engine.canUseFullScreenIntent()} 点亮屏幕=$lightScreen",
     )
+    // 3.6.9：第一次 play() 发生在后台广播里，部分 ROM 会静默丢弃后台发起的振动，导致「只有铃声
+    // 没有振动」（点亮屏幕且执行界面仍在前台时才侥幸成功）。服务真正进入前台后强制补发一次，
+    // 「不点亮屏幕」模式也能可靠振动。freshMount 保证每次响铃只补一次，避免振动被反复打断。
+    if (freshMount) {
+      AtkAlarmSound.ensureVibration(this, item, engine.globalVibrate(), force = true)
+    }
     if (!foregrounded) {
       // No foreground service at all: a plain notify() is the last remaining net.
       AtkDiag.log(this, "svc: 无法进入前台，改为兜底 notify + 本进程播铃")
@@ -175,6 +184,7 @@ class AtkAlarmService : Service() {
     val snapRepeat = AtkItem.intOf(item.actValue(14)).coerceIn(0, 10) // 0 = 无，N = N 次
     val snapIdx = AtkItem.intOf(item.actValue(13)).coerceIn(0, AtkOptions.SNAP_DUR.lastIndex)
     snapDurMin = snapMinutes(AtkOptions.SNAP_DUR[snapIdx]) // 预设时间（存的是选项索引）
+    pauseDurMin = engine.pauseMinutes(item) // 3.6.9：暂停提醒的恢复时长（act[27]）
     if (powerStyle != -1) registerPowerReceiver(powerStyle, id, lightScreen)
     if (snapRepeat > 0) {
       // 真正触发（fromSnooze=false）时重置自动贪睡次数，开启新一轮；贪睡重响（fromSnooze=true）
@@ -229,37 +239,43 @@ class AtkAlarmService : Service() {
   }
 
   /**
-   * 3.6.5：电源键按下监听。以「屏幕状态变化」作为电源键代理：
-   * - 点亮屏幕模式（lightScreen=true）：闹钟已点亮屏幕，用户按电源键灭屏（SCREEN_OFF）即触发。
-   * - 不点亮屏幕模式（lightScreen=false）：屏幕初始为灭，用户按电源键点亮（SCREEN_ON）即为首次
-   *   交互；同时兼容「亮屏时触发」的边界，两种事件都监听，首个触发即处理。
-   *   此前只监听 SCREEN_OFF，导致「不点亮屏幕」时第一次按电源键（亮屏）不触发，要再按一次灭屏才停，
-   *   即用户反馈的「要按两次才停止 / 第一次没暂停」。
-   * 按 act[25] 处理：暂停提醒=停止响铃并保留排程；自动贪睡=贪睡一次（用参数里的贪睡时长）。
+   * 3.6.5：电源键按下监听，以「屏幕状态变化」作为电源键代理。
+   * 3.6.9 重要修正：
+   * - 「不点亮屏幕」模式下用户按电源键亮屏 / 解锁，只是想看手机，**不能把任务终止**。此前
+   *   SCREEN_ON 会立刻走暂停/停止分支并 dismiss，正是用户反馈的「解锁手机后任务就直接终止了」。
+   *   现在 SCREEN_ON 只把执行界面显示出来，铃声与振动继续，监听也保留；只有随后主动灭屏
+   *   (SCREEN_OFF) 才视为「按下电源键」并应用 act[25]。
+   * - 「暂停提醒」不再是「停止本次执行」：停止响铃后挂 N 分钟（act[27] 暂停时长）自动继续，
+   *   不 dismiss、不取消排程、不清空自动贪睡次数（见 [pauseOnly]）。
+   * - 「自动贪睡」保持原行为（贪睡一次，用「预设时间」的时长重响）。
    */
   private fun registerPowerReceiver(powerStyle: Int, id: Long, lightScreen: Boolean) {
+    // 幂等：执行界面启动本服务时会再走一次 onStartCommand，避免叠加多个监听导致一次灭屏触发多次。
+    unregisterPowerReceiver()
     powerReceiver = object : BroadcastReceiver() {
       override fun onReceive(c: Context?, intent: Intent?) {
         val a = intent?.action ?: return
-        if ((a == "android.intent.action.SCREEN_OFF" || a == "android.intent.action.SCREEN_ON") && currentId == id) {
-          AtkDiag.log(
-            this@AtkAlarmService,
-            "svc: 电源键事件（${if (a == "android.intent.action.SCREEN_OFF") "灭屏" else "亮屏"}）powerStyle=$powerStyle id=$id",
-          )
-          unregisterPowerReceiver()
-          if (powerStyle == 1) {
-            // 自动贪睡：停止响铃并按参数里的贪睡时长挂重响。
-            // 3.6.8：先停服务（dismiss 会取消挂起的贪睡闹钟），再挂本次贪睡，避免被 dismiss 取消。
-            AtkAlarmSound.stop()
-            stopEverything(startIdForSnooze())
-            AtkEngine(this@AtkAlarmService).armSnooze(id, snapDurMin)
-          } else {
-            // 暂停提醒：停止响铃，保留该闹钟的后续排程（含自动贪睡），不 dismiss。
-            AtkAlarmSound.stop()
-            cancelAutoSnooze()
-            autoSnoozeLeft.remove(id)
-            stopEverything(startIdForSnooze())
-          }
+        if (a != "android.intent.action.SCREEN_OFF" && a != "android.intent.action.SCREEN_ON") return
+        if (currentId != id) return
+        AtkDiag.log(
+          this@AtkAlarmService,
+          "svc: 电源键事件（${if (a == "android.intent.action.SCREEN_OFF") "灭屏" else "亮屏"}）powerStyle=$powerStyle id=$id",
+        )
+        if (!lightScreen && a == "android.intent.action.SCREEN_ON") {
+          AtkDiag.log(this@AtkAlarmService, "svc: 亮屏/解锁不终止任务，显示执行界面 id=$id")
+          runCatching { AtkEngine(this@AtkAlarmService).launchAlarmFace(id, false, dedupe = true) }
+          return
+        }
+        unregisterPowerReceiver()
+        if (powerStyle == 1) {
+          // 自动贪睡：停止响铃并按参数里的贪睡时长挂重响。
+          // 3.6.8：先停服务（dismiss 会取消挂起的贪睡闹钟），再挂本次贪睡，避免被 dismiss 取消。
+          AtkAlarmSound.stop()
+          stopEverything(startIdForSnooze())
+          AtkEngine(this@AtkAlarmService).armSnooze(id, snapDurMin)
+        } else {
+          // 3.6.9：暂停提醒——本次响铃延后「暂停时长」后继续，绝不 dismiss。
+          pauseOnly(id)
         }
       }
     }
@@ -269,8 +285,7 @@ class AtkAlarmService : Service() {
         // 已点亮屏幕：只听灭屏（用户主动按电源键灭屏 = 暂停）。
         filter.addAction("android.intent.action.SCREEN_OFF")
       } else {
-        // 不点亮屏幕：初始为灭，用户按电源键点亮（SCREEN_ON）即首次交互；
-        // 也兼容亮屏时触发的边界，两种事件都听，首个触发即处理。
+        // 不点亮屏幕：亮屏只显示界面、不终止；灭屏才应用 act[25]。
         filter.addAction("android.intent.action.SCREEN_ON")
         filter.addAction("android.intent.action.SCREEN_OFF")
       }
@@ -279,6 +294,31 @@ class AtkAlarmService : Service() {
     } catch (e: Exception) {
       AtkDiag.log(this, "svc: 电源键监听注册失败 ${e.message}")
     }
+  }
+
+  /**
+   * 3.6.9：暂停提醒。与 [stopEverything] 的关键区别是**不调用 dismiss**，因此本次任务的排程、
+   * 自动贪睡次数都保留，且挂上「暂停 N 分钟后继续执行」的闹钟。用户手动终止 / 贪睡时
+   * AtkEngine.dismiss 会顺带取消这个闹钟，不会关掉后又自动响。
+   */
+  private fun pauseOnly(id: Long) {
+    AtkDiag.log(this, "svc: 暂停提醒 ${pauseDurMin} 分钟后继续 id=$id")
+    AtkAlarmSound.stop()
+    unregisterFlipSensor()
+    unregisterPowerReceiver()
+    cancelAutoSnooze()
+    releaseWakeLock()
+    if (foreground) {
+      try {
+        stopForeground(STOP_FOREGROUND_REMOVE)
+      } catch (e: Exception) {
+      }
+      foreground = false
+    }
+    currentId = -1L
+    mountedId = -1L
+    AtkEngine(this).armPauseResume(id, pauseDurMin)
+    stopSelf(startIdForSnooze())
   }
 
   private fun unregisterPowerReceiver() {
