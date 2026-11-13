@@ -23,14 +23,24 @@ object AtkDiag {
   private const val DEBUG_KEY = "debug"
 
   /**
-   * The 调试 switch in 权限自检 gates ALL logging. OFF means the chain never writes a line.
-   * 3.6.9：系统设置里新增的「执行日志」总开关同样作为闸门——关闭后触发日志与执行记录都不再写入，
-   * 需要排查「到点不响」时把两个开关都打开即可。两个开关是 AND 关系，互不冲突。
+   * 3.7.0：两个日志开关彻底分离。
+   * - 触发日志（本对象写的 atk_diag 诊断链）**只受权限自检里的「调试」开关**控制；
+   * - 执行日志（AtkStore.log 写的 actlog 表、查看日志）**只受系统设置里的「执行日志」开关**控制。
+   * 3.6.9 曾把两者做成 AND 关系，导致关掉「执行日志」后连排查「到点不响」的触发日志也没了。
    */
   fun isDebug(context: Context): Boolean =
     try {
-      val sp = context.applicationContext.getSharedPreferences(SETTINGS, Context.MODE_PRIVATE)
-      sp.getBoolean(DEBUG_KEY, true) && sp.getString("exec_log", "开启") != "关闭"
+      context.applicationContext.getSharedPreferences(SETTINGS, Context.MODE_PRIVATE)
+        .getBoolean(DEBUG_KEY, true)
+    } catch (e: Exception) {
+      true
+    }
+
+  /** 系统设置 → 常规设置 → 执行日志：只控制 actlog 执行记录，不影响触发日志。 */
+  fun isExecLogEnabled(context: Context): Boolean =
+    try {
+      context.applicationContext.getSharedPreferences(SETTINGS, Context.MODE_PRIVATE)
+        .getString("exec_log", "开启") != "关闭"
     } catch (e: Exception) {
       true
     }

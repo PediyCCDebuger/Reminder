@@ -903,7 +903,7 @@ private val GENERAL_SETTINGS = listOf(
   SettingDef("notify_icon", "通知栏图标", listOf("应用程序图标", "定时器状态图标", "不显示"), "应用程序图标"),
   SettingDef("icon_click", "点击定时器图标", listOf("操作菜单", "编辑定时器", "执行任务"), "操作菜单"),
   SettingDef("sort", "任务排序方式", listOf("按执行时间", "按创建时间", "按名称"), "按执行时间"),
-  // 3.6.9：执行日志总开关。关闭后 AtkStore.log 不再写 actlog，AtkDiag 也不再记触发日志。
+  // 3.7.0：只控制 actlog 执行记录（查看日志）；触发日志由权限自检的「调试」开关单独控制。
   SettingDef("exec_log", "执行日志", listOf("开启", "关闭"), "开启"),
   SettingDef("log_keep", "执行日志保存期限", listOf("3天", "一星期", "一个月", "三个月", "半年", "一年", "永久"), "一个月"),
 )
@@ -1228,7 +1228,7 @@ private fun BackupEntry(text: String, onClick: () -> Unit) {
 private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
   val context = LocalContext.current
   var version by remember { mutableIntStateOf(0) }
-  // 3.6.4：调试总开关。关闭后 触发日志 不再记录（见 AtkDiag.isDebug）。默认开启。
+  // 3.7.0：调试开关只控制触发日志（AtkDiag），与系统设置里的「执行日志」开关互不影响。
   var debugOn by remember { mutableStateOf(AtkDiag.isDebug(context)) }
   var showLog by remember { mutableStateOf(false) }
   // 3.6.5：刷新状态检测后的权限总检提醒弹窗。
@@ -1302,7 +1302,8 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
       }
       item { AtkSection("诊断") }
       item {
-        // 3.6.4：调试开关。关闭后 触发日志 完全不记录（AtkDiag.log 在 isDebug() 为假时直接返回）。
+        // 3.7.0：调试开关只控制触发日志（AtkDiag.log 在 isDebug() 为假时直接返回），
+        // 不影响系统设置里的「执行日志」，也不受它影响。
         AtkSwitchRow("调试", checked = debugOn) { v ->
           try {
             context.getSharedPreferences("atk_settings", Context.MODE_PRIVATE)
@@ -1310,7 +1311,7 @@ private fun PermissionScreen(engine: AtkEngine, onBack: () -> Unit) {
           } catch (e: Exception) {
           }
           debugOn = v
-          toast(context, if (v) "已开启调试（将记录触发日志）" else "已关闭调试（不再记录日志）")
+          toast(context, if (v) "已开启调试（将记录触发日志）" else "已关闭调试（不再记录触发日志）")
         }
       }
       item {

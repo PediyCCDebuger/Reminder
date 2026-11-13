@@ -1,5 +1,6 @@
 package com.lentikr.reminder.timer
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -37,7 +38,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -722,11 +726,77 @@ fun AtkSystemMenu(onPick: (Int) -> Unit, onDismiss: () -> Unit) {
   }
 }
 
+/**
+ * 3.7.0：三个入口改用同一套自绘矢量时钟图标。此前用的是三个 emoji 字符，系统字体给它们的
+ * 字形尺寸与基线各不相同（「快速提醒」的 ⏱ 明显更小、文字也更靠下），换成固定 48dp 的
+ * Canvas 图标 + 固定高度容器后，三个图标等大、文字基线完全对齐。
+ */
+@Composable
+private fun AtkNewTaskIcon(kind: Int) {
+  Canvas(Modifier.size(48.dp)) {
+    val c = center
+    val r = size.minDimension * 0.30f
+    val stroke = 2.2.dp.toPx()
+    val white = Color.White
+    val accent = Color(0xFFFF5A5A)
+    drawCircle(white, r, c, style = Stroke(stroke))
+    drawLine(white, c, Offset(c.x, c.y - r * 0.58f), stroke, StrokeCap.Round)
+    drawLine(white, c, Offset(c.x + r * 0.48f, c.y + r * 0.26f), stroke, StrokeCap.Round)
+    drawCircle(accent, 2.2.dp.toPx(), c)
+    when (kind) {
+      0 -> { // 定时提醒：闹钟双铃 + 双脚
+        drawCircle(accent, r * 0.22f, Offset(c.x - r * 0.78f, c.y - r * 0.92f))
+        drawCircle(accent, r * 0.22f, Offset(c.x + r * 0.78f, c.y - r * 0.92f))
+        drawLine(
+          accent,
+          Offset(c.x - r * 0.55f, c.y + r * 0.82f),
+          Offset(c.x - r * 0.85f, c.y + r * 1.12f),
+          stroke, StrokeCap.Round,
+        )
+        drawLine(
+          accent,
+          Offset(c.x + r * 0.55f, c.y + r * 0.82f),
+          Offset(c.x + r * 0.85f, c.y + r * 1.12f),
+          stroke, StrokeCap.Round,
+        )
+      }
+      1 -> { // 快速提醒：秒表表冠 + 侧键
+        drawLine(
+          accent,
+          Offset(c.x, c.y - r - 1.dp.toPx()),
+          Offset(c.x, c.y - r - 7.dp.toPx()),
+          4.dp.toPx(), StrokeCap.Round,
+        )
+        drawLine(
+          accent,
+          Offset(c.x + r * 0.86f, c.y - r * 0.62f),
+          Offset(c.x + r * 1.14f, c.y - r * 0.86f),
+          4.dp.toPx(), StrokeCap.Round,
+        )
+      }
+      else -> { // 整点报时：12 个整点刻度
+        for (i in 0 until 12) {
+          val a = Math.toRadians(i * 30.0 - 90.0)
+          val inner = r * 0.76f
+          val outer = r * 0.94f
+          val sin = kotlin.math.sin(a)
+          val cos = kotlin.math.cos(a)
+          drawLine(
+            accent,
+            Offset(c.x + (cos * inner).toFloat(), c.y + (sin * inner).toFloat()),
+            Offset(c.x + (cos * outer).toFloat(), c.y + (sin * outer).toFloat()),
+            1.6.dp.toPx(), StrokeCap.Round,
+          )
+        }
+      }
+    }
+  }
+}
+
 /** "提醒管理" popup shown by 新增任务 — only the reminder group, as requested. */
 @Composable
 fun AtkNewTaskDialog(onPick: (Int) -> Unit, onDismiss: () -> Unit) {
   val names = listOf("定时提醒", "快速提醒", "整点报时")
-  val icons = listOf("\u23F0", "\u23F1", "\uD83D\uDD50")
   Dialog(onDismissRequest = onDismiss) {
     Column(
       Modifier
@@ -756,8 +826,10 @@ fun AtkNewTaskDialog(onPick: (Int) -> Unit, onDismiss: () -> Unit) {
             Modifier.weight(1f).clickable { onPick(i) },
             horizontalAlignment = Alignment.CenterHorizontally,
           ) {
-            Text(icons[i], fontSize = 34.sp)
-            Spacer(Modifier.height(8.dp))
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+              AtkNewTaskIcon(i)
+            }
+            Spacer(Modifier.height(6.dp))
             Text(name, color = Color.White, fontSize = 14.sp)
           }
         }

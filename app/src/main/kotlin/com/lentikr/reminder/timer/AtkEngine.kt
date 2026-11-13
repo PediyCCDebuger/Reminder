@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
 import cn.nnci.addintimer.Occurrence
+import cn.nnci.addintimer.Rule
 import com.lentikr.reminder.R
 import java.time.LocalDateTime
 import java.time.ZoneId
@@ -406,25 +407,38 @@ class AtkEngine(private val context: Context) {
   fun nextMillis(item: AtkItem, after: LocalDateTime = LocalDateTime.now()): Long {
     try {
       val r = item.rule
-      var t = Occurrence.first(r, item.hour, item.minute, after) ?: return 0L
-      // 时循环: within the firing day, repeat every N minutes until 结束时间.
-      if (item.hourLoop != 0 && item.loopMinutes > 0 && r.mode != 4) {
-        val endMinutes = item.loopEndH * 60 + item.loopEndM
-        val startMinutes = item.hour * 60 + item.minute
-        val step = item.loopMinutes
-        val nowMinutes = after.hour * 60 + after.minute
-        if (endMinutes > startMinutes && step > 0 && after.toLocalDate() == t.toLocalDate()) {
+      // 3.7.0：倒计时「从现在开始」= 一次性倒计时。锚点由编辑页保存时写入 base[6]，
+      // 重启 / 重新排程都不会让倒计时重新计时；过期后返回 0（不再排程）。
+      if (r.mode == Rule.MODE_TARGET && r.hourCycle != 0 && item.nextMs > 0) {
+        val at = item.nextMs
+        return if (at > System.currentTimeMillis()) at else 0L
+      }
+      val base = Occurrence.first(r, item.hour, item.minute, after)
+      // 不在这里提前 return：一次性日期的「开始时间」已过但开了时循环时，今天的后续时点仍应生效。
+      var best = if (base != null) toMillis(base) else 0L
+      // 3.7.0：时循环旧实现要求「基础触发日 == 今天」，可 Occurrence.first 恒返回严格晚于
+      // after 的时刻（当天 8:00 一过就变成次日 8:00），条件几乎永远为假 —— 整点报时实际
+      // 每天只响一次。现在改为：只要「今天是执行日」，就枚举 [开始时间, 结束时间] 内每 N
+      // 分钟的时刻，取第一个晚于 after 的，并与基础触发时间取较早者。
+      if (item.hourLoop != 0 && item.loopMinutes > 0 && r.mode != Rule.MODE_LUNAR) {
+        val startMinutes = (item.hour * 60 + item.minute).coerceIn(0, 1439)
+        val endMinutes = (item.loopEndH * 60 + item.loopEndM).coerceIn(0, 1439)
+        val step = item.loopMinutes.coerceAtLeast(1)
+        if (endMinutes > startMinutes && Occurrence.matches(r, after.toLocalDate())) {
+          val day = after.toLocalDate()
           var m = startMinutes
-          while (m < nowMinutes) m += step
-          if (m in startMinutes..endMinutes) {
-            t = t.withHour((m / 60).coerceIn(0, 23))
-              .withMinute((m % 60).coerceIn(0, 59))
-              .withSecond(0)
-            if (!t.isAfter(after)) return toMillis(t.plusMinutes(step.toLong()))
+          while (m <= endMinutes) {
+            val cand = day.atStartOfDay().plusMinutes(m.toLong())
+            if (cand.isAfter(after)) {
+              val ms = toMillis(cand)
+              best = if (best > 0) minOf(best, ms) else ms
+              break
+            }
+            m += step
           }
         }
       }
-      return toMillis(t)
+      return best
     } catch (e: Exception) {
       return 0L
     }

@@ -372,8 +372,12 @@ class AtkItem {
         1 -> {
           it.name = "快速提醒"
           r.mode = Rule.MODE_ONCE
-          val n = java.time.LocalDate.now()
-          r.sy = n.year; r.sm = n.monthValue; r.sd = n.dayOfMonth
+          // 3.7.0：此前固定 08:00 + 今天，下午 / 晚上新建的「快速提醒」因日期时间已过而永不触发。
+          // 改为「一分钟后」并正确处理跨零点（23:59 新建 → 次日 00:00）。
+          val at = java.time.LocalDateTime.now().plusMinutes(1).withSecond(0).withNano(0)
+          it.hour = at.hour
+          it.minute = at.minute
+          r.sy = at.year; r.sm = at.monthValue; r.sd = at.dayOfMonth
         }
         2 -> {
           it.name = "整点报时"

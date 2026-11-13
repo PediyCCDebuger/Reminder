@@ -242,13 +242,8 @@ class AtkStore(private val context: Context) {
 
   /** Same actlog table the original app used; feeds 查看日志 in the long-press menu. */
   fun log(timerId: Long, state: Int, info: String) {
-    // 3.6.9：系统设置「执行日志」= 关闭时完全不写库（含「查看日志」与触发记录）。
-    try {
-      if (context.getSharedPreferences("atk_settings", Context.MODE_PRIVATE)
-          .getString("exec_log", "开启") == "关闭") return
-    } catch (e: Exception) {
-      // 读设置失败不应影响写日志本身。
-    }
+    // 3.7.0：只受系统设置「执行日志」开关控制；触发日志由 AtkDiag 的「调试」开关单独控制。
+    if (!AtkDiag.isExecLogEnabled(context)) return
     val v = ContentValues()
     v.put("date", System.currentTimeMillis())
     v.put("timerid", timerId)

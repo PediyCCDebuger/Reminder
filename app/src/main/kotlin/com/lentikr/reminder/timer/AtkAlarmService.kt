@@ -70,6 +70,8 @@ class AtkAlarmService : Service() {
   private var snapDurMin = 10
   /** 3.6.9：电源键「暂停提醒」的暂停时长（分钟），来自任务扩展参数 act[27]。 */
   private var pauseDurMin = 3
+  /** 3.7.0：本次响铃开始时的屏幕状态，用于把「第一次按电源键」识别成一次屏幕状态翻转。 */
+  private var powerBaselineOn = false
 
   override fun onBind(intent: Intent?): IBinder? = null
 
@@ -185,7 +187,15 @@ class AtkAlarmService : Service() {
     val snapIdx = AtkItem.intOf(item.actValue(13)).coerceIn(0, AtkOptions.SNAP_DUR.lastIndex)
     snapDurMin = snapMinutes(AtkOptions.SNAP_DUR[snapIdx]) // 预设时间（存的是选项索引）
     pauseDurMin = engine.pauseMinutes(item) // 3.6.9：暂停提醒的恢复时长（act[27]）
-    if (powerStyle != -1) registerPowerReceiver(powerStyle, id, lightScreen)
+    // 3.7.0：记录响铃开始时的屏幕状态。此前「不点亮屏幕」模式把 SCREEN_ON 当成「只是亮屏看界面」，
+    // 要再按一次灭屏才暂停；与「点亮屏幕」模式「按一次即暂停」不一致。现在统一为「第一次屏幕状态
+    // 翻转 = 按下电源键」，两种模式、首次响铃与暂停后重响都是按一次即生效。
+    powerBaselineOn = try {
+      (getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
+    } catch (e: Exception) {
+      lightScreen
+    }
+    if (powerStyle != -1) registerPowerReceiver(powerStyle, id, lightScreen, powerBaselineOn)
     if (snapRepeat > 0) {
       // 真正触发（fromSnooze=false）时重置自动贪睡次数，开启新一轮；贪睡重响（fromSnooze=true）
       // 时保留已递减的次数，避免无限贪睡或次日失效。
@@ -240,32 +250,44 @@ class AtkAlarmService : Service() {
 
   /**
    * 3.6.5：电源键按下监听，以「屏幕状态变化」作为电源键代理。
-   * 3.6.9 重要修正：
-   * - 「不点亮屏幕」模式下用户按电源键亮屏 / 解锁，只是想看手机，**不能把任务终止**。此前
-   *   SCREEN_ON 会立刻走暂停/停止分支并 dismiss，正是用户反馈的「解锁手机后任务就直接终止了」。
-   *   现在 SCREEN_ON 只把执行界面显示出来，铃声与振动继续，监听也保留；只有随后主动灭屏
-   *   (SCREEN_OFF) 才视为「按下电源键」并应用 act[25]。
-   * - 「暂停提醒」不再是「停止本次执行」：停止响铃后挂 N 分钟（act[27] 暂停时长）自动继续，
-   *   不 dismiss、不取消排程、不清空自动贪睡次数（见 [pauseOnly]）。
-   * - 「自动贪睡」保持原行为（贪睡一次，用「预设时间」的时长重响）。
+   * 3.7.0 统一行为：本次响铃期间**第一次真正的屏幕状态翻转**即视为按下电源键，与屏幕模式、
+   * 是首次响铃还是暂停后重响无关，按一次就生效：
+   * - 「点亮屏幕」模式：响铃时屏幕为亮，按电源键 → SCREEN_OFF → 暂停并息屏；
+   * - 「不点亮屏幕」模式：响铃时屏幕为灭，按电源键 → SCREEN_ON → 同样暂停（不再需要先亮屏再按第二次）。
+   * 屏幕上注册瞬间的同向事件（执行界面自动亮屏、通知唤醒屏幕）与响铃最初 600ms 内的自动亮/灭屏
+   * 都会被忽略，不会误判为按键；忽略时会同步基线，保证下一次真实按键仍能正确翻转。
+   * 由于暂停现在是「挂 N 分钟后继续」而非 dismiss（见 [pauseOnly]），亮屏/解锁也不会终止任务。
+   * 「暂停提醒」与「自动贪睡」分别按 act[25] 处理。
    */
-  private fun registerPowerReceiver(powerStyle: Int, id: Long, lightScreen: Boolean) {
-    // 幂等：执行界面启动本服务时会再走一次 onStartCommand，避免叠加多个监听导致一次灭屏触发多次。
+  private fun registerPowerReceiver(
+    powerStyle: Int,
+    id: Long,
+    lightScreen: Boolean,
+    baselineOn: Boolean,
+  ) {
+    // 幂等：执行界面启动本服务时会再走一次 onStartCommand，避免叠加多个监听导致一次按键触发多次。
     unregisterPowerReceiver()
+    var screenOn = baselineOn
+    val armedAt = System.currentTimeMillis()
     powerReceiver = object : BroadcastReceiver() {
       override fun onReceive(c: Context?, intent: Intent?) {
         val a = intent?.action ?: return
         if (a != "android.intent.action.SCREEN_OFF" && a != "android.intent.action.SCREEN_ON") return
         if (currentId != id) return
-        AtkDiag.log(
-          this@AtkAlarmService,
-          "svc: 电源键事件（${if (a == "android.intent.action.SCREEN_OFF") "灭屏" else "亮屏"}）powerStyle=$powerStyle id=$id",
-        )
-        if (!lightScreen && a == "android.intent.action.SCREEN_ON") {
-          AtkDiag.log(this@AtkAlarmService, "svc: 亮屏/解锁不终止任务，显示执行界面 id=$id")
-          runCatching { AtkEngine(this@AtkAlarmService).launchAlarmFace(id, false, dedupe = true) }
+        val nowOn = a == "android.intent.action.SCREEN_ON"
+        if (nowOn == screenOn) return // 同向噪声（重复广播、自动亮屏）
+        screenOn = nowOn
+        if (System.currentTimeMillis() - armedAt < 600L) {
+          AtkDiag.log(this@AtkAlarmService, "svc: 忽略响铃瞬间的自动屏幕变化 id=$id")
           return
         }
+        AtkDiag.log(
+          this@AtkAlarmService,
+          "svc: 电源键按下（${if (nowOn) "亮屏" else "灭屏"}）powerStyle=$powerStyle " +
+            "点亮屏幕=$lightScreen 基线=${if (baselineOn) "亮" else "灭"} id=$id",
+        )
+        // 3.7.0：不再于此拉起执行界面——那会把屏幕点亮又立刻随暂停释放唤醒锁而熄灭，
+        // 就是用户反馈的「屏幕亮起马上关闭」。现在只静默暂停，屏幕状态完全交给硬件按键本身。
         unregisterPowerReceiver()
         if (powerStyle == 1) {
           // 自动贪睡：停止响铃并按参数里的贪睡时长挂重响。
@@ -281,16 +303,13 @@ class AtkAlarmService : Service() {
     }
     try {
       val filter = IntentFilter()
-      if (lightScreen) {
-        // 已点亮屏幕：只听灭屏（用户主动按电源键灭屏 = 暂停）。
-        filter.addAction("android.intent.action.SCREEN_OFF")
-      } else {
-        // 不点亮屏幕：亮屏只显示界面、不终止；灭屏才应用 act[25]。
-        filter.addAction("android.intent.action.SCREEN_ON")
-        filter.addAction("android.intent.action.SCREEN_OFF")
-      }
+      filter.addAction("android.intent.action.SCREEN_ON")
+      filter.addAction("android.intent.action.SCREEN_OFF")
       registerReceiver(powerReceiver, filter)
-      AtkDiag.log(this, "svc: 电源键监听已注册 id=$id lightScreen=$lightScreen")
+      AtkDiag.log(
+        this,
+        "svc: 电源键监听已注册 id=$id lightScreen=$lightScreen 基线=${if (baselineOn) "亮" else "灭"}",
+      )
     } catch (e: Exception) {
       AtkDiag.log(this, "svc: 电源键监听注册失败 ${e.message}")
     }

@@ -1,8 +1,6 @@
 package com.lentikr.reminder.timer
 
 import android.app.Activity
-import android.app.DatePickerDialog
-import android.content.Context
 import android.content.Intent
 import android.media.RingtoneManager
 import android.net.Uri
@@ -86,6 +84,17 @@ private data class TimeState(
   val onPick: (Int, Int) -> Unit,
 )
 
+/**
+ * 3.7.0：Pending 选择日期 popup。用 Compose 状态驱动，替代框架 DatePickerDialog——后者在这台
+ * 机器上显示的是 2011 年的 Holo 日历，且回调不在当前界面重组作用域内，选完日期一栏不刷新。
+ */
+private data class DateState(
+  val y: Int,
+  val m: Int,
+  val d: Int,
+  val onPick: (Int, Int, Int) -> Unit,
+)
+
 /** Pending ringtone/music picker: label → stored value (URI, 缺省铃音, 无). */
 private data class RingListState(
   val title: String,
@@ -137,6 +146,26 @@ fun AtkEditScreen(
         if (draft.name.isBlank()) {
           onMessage("任务名称不能为空")
         } else {
+          // 3.7.0：倒计时「从现在开始」= 以保存时刻为锚点的一次性倒计时。锚点存 base[6]
+          // （原版的「下次执行时间」字段，本项目未占用），保证重启 / 重排程后不会重新计时。
+          if (draft.rule.mode == Rule.MODE_TARGET && draft.rule.hourCycle != 0) {
+            draft.nextMs = System.currentTimeMillis() +
+              draft.rule.cdMinutes.coerceAtLeast(1) * 60_000L
+          } else {
+            draft.nextMs = 0L
+          }
+          // 3.7.0：新建「快速提醒」以保存时刻重新锚定。编辑页可能停留超过一分钟，
+          // 打开时预置的「一分钟后」会过期，导致指定日期的一次性任务永不触发。
+          if (item == null && preset == 1 && draft.name == "快速提醒" &&
+            draft.rule.mode == Rule.MODE_ONCE
+          ) {
+            val at = java.time.LocalDateTime.now().plusMinutes(1).withSecond(0).withNano(0)
+            draft.hour = at.hour
+            draft.minute = at.minute
+            draft.rule.sy = at.year
+            draft.rule.sm = at.monthValue
+            draft.rule.sd = at.dayOfMonth
+          }
           onSave(draft)
         }
       },
@@ -149,23 +178,13 @@ fun AtkEditScreen(
 
 @Composable
 private fun TimeTab(draft: AtkItem, change: (() -> Unit) -> Unit) {
-  val context = LocalContext.current
   val r = draft.rule
   var choice by remember { mutableStateOf<ChoiceState?>(null) }
   var multi by remember { mutableStateOf<MultiState?>(null) }
   var input by remember { mutableStateOf<InputState?>(null) }
   var time by remember { mutableStateOf<TimeState?>(null) }
-
-  fun pickDate(y: Int, m: Int, d: Int, cb: (Int, Int, Int) -> Unit) {
-    val yy = if (y > 0) y else LocalDate.now().year
-    val mm = if (m in 1..12) m else LocalDate.now().monthValue
-    val dd = if (d in 1..31) d else LocalDate.now().dayOfMonth
-    DatePickerDialog(
-      context,
-      { _, year, month, day -> cb(year, month + 1, day) },
-      yy, mm - 1, dd,
-    ).show()
-  }
+  // 3.7.0：日期选择改为本界面内的 Compose 状态，选完必定重组刷新日期栏。
+  var date by remember { mutableStateOf<DateState?>(null) }
 
   fun pickTime(h: Int, m: Int, cb: (Int, Int) -> Unit) {
     time = TimeState(h.coerceIn(0, 23), m.coerceIn(0, 59), cb)
@@ -199,7 +218,9 @@ private fun TimeTab(draft: AtkItem, change: (() -> Unit) -> Unit) {
       }
       Rule.MODE_ONCE -> {
         AtkSpinnerRow("选择日期", dateText(r.sy, r.sm, r.sd)) {
-          pickDate(r.sy, r.sm, r.sd) { y, m, d -> change { r.sy = y; r.sm = m; r.sd = d } }
+          date = DateState(r.sy, r.sm, r.sd) { y, m, d ->
+            change { r.sy = y; r.sm = m; r.sd = d }
+          }
         }
       }
       Rule.MODE_DAYS -> {
@@ -209,7 +230,9 @@ private fun TimeTab(draft: AtkItem, change: (() -> Unit) -> Unit) {
           }
         }
         AtkSpinnerRow("开始日期", dateText(r.by, r.bm, r.bd)) {
-          pickDate(r.by, r.bm, r.bd) { y, m, d -> change { r.by = y; r.bm = m; r.bd = d } }
+          date = DateState(r.by, r.bm, r.bd) { y, m, d ->
+            change { r.by = y; r.bm = m; r.bd = d }
+          }
         }
       }
       Rule.MODE_YEAR_MONTH -> {
@@ -270,18 +293,36 @@ private fun TimeTab(draft: AtkItem, change: (() -> Unit) -> Unit) {
         }
       }
       Rule.MODE_TARGET -> {
-        AtkSpinnerRow("目标日期", dateText(r.ey, r.em, r.ed)) {
-          pickDate(r.ey, r.em, r.ed) { y, m, d -> change { r.ey = y; r.em = m; r.ed = d } }
-        }
-        AtkSpinnerRow("倒计时分钟", "${r.cdMinutes.coerceAtLeast(1)} 分钟") {
-          input = InputState("倒计时分钟", r.cdMinutes.toString(), numeric = true) { v ->
-            change { r.cdMinutes = (v.toIntOrNull() ?: 30).coerceAtLeast(1) }
-          }
-        }
+        // 3.7.0：明确两种互斥语义，避免「倒计时分钟 / 目标日期」看起来能设却完全不生效。
+        //   否 → 在目标日期的「开始时间」一次性提醒；
+        //   是 → 从保存时刻起「倒计时分钟」分钟后一次性提醒（锚点存 base[6]）。
         AtkSpinnerRow("从现在开始", if (r.hourCycle != 0) "是" else "否") {
           choice = ChoiceState("从现在开始", listOf("否", "是"), r.hourCycle.coerceIn(0, 1)) { v ->
             change { r.hourCycle = v }
           }
+        }
+        if (r.hourCycle != 0) {
+          AtkSpinnerRow("倒计时分钟", "${r.cdMinutes.coerceAtLeast(1)} 分钟") {
+            input = InputState("倒计时分钟", r.cdMinutes.toString(), numeric = true) { v ->
+              change { r.cdMinutes = (v.toIntOrNull() ?: 30).coerceAtLeast(1) }
+            }
+          }
+          Text(
+            "从保存任务起 N 分钟后响一次；目标日期与开始时间不生效。",
+            color = AtkSkin.sub, fontSize = 12.sp,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+          )
+        } else {
+          AtkSpinnerRow("目标日期", dateText(r.ey, r.em, r.ed)) {
+            date = DateState(r.ey, r.em, r.ed) { y, m, d ->
+              change { r.ey = y; r.em = m; r.ed = d }
+            }
+          }
+          Text(
+            "在目标日期的「开始时间」响一次（一次性）。",
+            color = AtkSkin.sub, fontSize = 12.sp,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+          )
         }
       }
     }
@@ -356,6 +397,194 @@ private fun TimeTab(draft: AtkItem, change: (() -> Unit) -> Unit) {
       onConfirm = { h, m -> t.onPick(h, m); time = null },
       onDismiss = { time = null },
     )
+  }
+  date?.let { ds ->
+    AtkDatePickerDialog(
+      initialYear = ds.y,
+      initialMonth = ds.m,
+      initialDay = ds.d,
+      onConfirm = { y, m, d -> ds.onPick(y, m, d); date = null },
+      onDismiss = { date = null },
+    )
+  }
+}
+
+/**
+ * 3.7.0：复刻原版「选择日期」——三列数字，上 + 下 −，中间可直接手工输入，底部
+ * 设置 / 今天 / 取消。全部用 Compose 状态驱动，确定后立即重组刷新时间设置页的日期栏。
+ * 年 / 月 / 日联动：月循环 1..12，日自动夹到当月天数（2026-02-29 → 2026-02-28）。
+ */
+@Composable
+private fun AtkDatePickerDialog(
+  initialYear: Int,
+  initialMonth: Int,
+  initialDay: Int,
+  onConfirm: (Int, Int, Int) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  val today = LocalDate.now()
+  var year by remember { mutableIntStateOf(if (initialYear in 1900..2100) initialYear else today.year) }
+  var month by remember { mutableIntStateOf(if (initialMonth in 1..12) initialMonth else today.monthValue) }
+  var day by remember { mutableIntStateOf(if (initialDay in 1..31) initialDay else today.dayOfMonth) }
+
+  fun maxDay(y: Int, m: Int): Int = try {
+    LocalDate.of(y.coerceIn(1900, 2100), m.coerceIn(1, 12), 1).lengthOfMonth()
+  } catch (e: Exception) {
+    31
+  }
+  fun setMonth(v: Int) {
+    month = when {
+      v > 12 -> 1
+      v < 1 -> 12
+      else -> v
+    }
+    day = day.coerceIn(1, maxDay(year, month))
+  }
+  fun setYear(v: Int) {
+    year = v.coerceIn(1900, 2100)
+    day = day.coerceIn(1, maxDay(year, month))
+  }
+  fun setDay(v: Int) {
+    val max = maxDay(year, month)
+    day = when {
+      v > max -> 1
+      v < 1 -> max
+      else -> v
+    }
+  }
+
+  Dialog(onDismissRequest = onDismiss) {
+    Column(
+      Modifier
+        .width(320.dp)
+        .background(Color(0xFF1B1B1B))
+        .border(1.dp, Color(0xFF4A4A4A)),
+    ) {
+      Row(
+        Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Text("▦", color = Color.White, fontSize = 17.sp)
+        Spacer(Modifier.width(8.dp))
+        Text("选择日期", color = Color.White, fontSize = 15.sp)
+      }
+      Box(Modifier.fillMaxWidth().height(1.dp).background(Color(0xFF3C3C3C)))
+      Row(
+        Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 16.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        DateStepperColumn(
+          year, 4, 1900, 2100,
+          { setYear(year + 1) }, { setYear(year - 1) }, { v -> setYear(v) },
+        )
+        Spacer(Modifier.width(8.dp))
+        DateStepperColumn(
+          month, 2, 1, 12,
+          { setMonth(month + 1) }, { setMonth(month - 1) }, { v -> setMonth(v) },
+        )
+        Spacer(Modifier.width(8.dp))
+        DateStepperColumn(day, 2, 1, maxDay(year, month), { setDay(day + 1) }, { setDay(day - 1) }) { v ->
+          day = v.coerceIn(1, maxDay(year, month))
+        }
+      }
+      Text(
+        "年 / 月 / 日（点击数字可直接输入）",
+        color = Color(0xFF9A9A9A), fontSize = 12.sp,
+        modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+      )
+      Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 14.dp)) {
+        TimeDialogButton("设置", Modifier.weight(1f)) {
+          onConfirm(year, month, day.coerceIn(1, maxDay(year, month)))
+        }
+        Spacer(Modifier.width(10.dp))
+        TimeDialogButton("今天", Modifier.weight(1f)) {
+          onConfirm(today.year, today.monthValue, today.dayOfMonth)
+        }
+        Spacer(Modifier.width(10.dp))
+        TimeDialogButton("取消", Modifier.weight(1f), onDismiss)
+      }
+    }
+  }
+}
+
+/** 一列：银色 + 条、白底可编辑数字、银色 − 条。 */
+@Composable
+private fun DateStepperColumn(
+  value: Int,
+  digits: Int,
+  min: Int,
+  max: Int,
+  onStepUp: () -> Unit,
+  onStepDown: () -> Unit,
+  onSet: (Int) -> Unit,
+) {
+  Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    DateStepBar("+", onStepUp)
+    Spacer(Modifier.height(8.dp))
+    DateValueField(value, digits, min, max, onSet)
+    Spacer(Modifier.height(8.dp))
+    DateStepBar("−", onStepDown)
+  }
+}
+
+@Composable
+private fun DateValueField(value: Int, digits: Int, min: Int, max: Int, onSet: (Int) -> Unit) {
+  fun fmt(v: Int) = String.format(Locale.CHINA, "%0${digits}d", v)
+  var text by remember { mutableStateOf(fmt(value)) }
+  val interactionSource = remember { MutableInteractionSource() }
+  val focused by interactionSource.collectIsFocusedAsState()
+  LaunchedEffect(value) {
+    val cur = text.toIntOrNull()
+    if (cur != null && cur != value) text = fmt(value)
+  }
+  LaunchedEffect(focused) {
+    if (!focused) text = fmt((text.toIntOrNull() ?: value).coerceIn(min, max))
+  }
+  Box(
+    Modifier.width(88.dp).height(52.dp).background(Color(0xFFF6F6F6)),
+    contentAlignment = Alignment.Center,
+  ) {
+    BasicTextField(
+      value = text,
+      onValueChange = { raw ->
+        val ds = raw.filter { it.isDigit() }.take(digits)
+        if (ds.isEmpty()) {
+          text = ""
+          onSet(min)
+        } else {
+          val n = ds.toIntOrNull() ?: min
+          val clamped = n.coerceIn(min, max)
+          text = if (clamped == n) ds else fmt(clamped)
+          onSet(clamped)
+        }
+      },
+      singleLine = true,
+      interactionSource = interactionSource,
+      textStyle = TextStyle(
+        color = Color(0xFF111111),
+        fontSize = if (digits > 2) 24.sp else 30.sp,
+        textAlign = TextAlign.Center,
+      ),
+      keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+      cursorBrush = SolidColor(Color(0xFF111111)),
+      modifier = Modifier.fillMaxWidth().padding(horizontal = 2.dp),
+    )
+  }
+}
+
+@Composable
+private fun DateStepBar(label: String, onClick: () -> Unit) {
+  Box(
+    Modifier
+      .width(88.dp)
+      .height(38.dp)
+      .background(AtkSkin.silver)
+      .border(1.dp, Color(0xFF9A9A9A))
+      .clickable(onClick = onClick),
+    contentAlignment = Alignment.Center,
+  ) {
+    Text(label, color = Color(0xFF333333), fontSize = 24.sp, fontWeight = FontWeight.Bold)
   }
 }
 
