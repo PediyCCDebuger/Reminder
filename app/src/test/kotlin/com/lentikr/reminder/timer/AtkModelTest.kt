@@ -85,7 +85,10 @@ class AtkModelTest {
       assertEquals(tab, reloaded.pageIndex())
       assertEquals("新定时器", reloaded.name)
       assertEquals("ALARM", reloaded.kind)
-      assertEquals(27, reloaded.act.size)
+      // 3.6.9：新建任务带扩展参数 act[27]「暂停时长」，共 28 项。原版按固定下标只读前 27 项，
+      // 多余字段忽略；老数据（如 AtkSamples.PARAMS / 损坏行）解析后仍是 27 项，见下列测试。
+      assertEquals(28, reloaded.act.size)
+      assertEquals("2", reloaded.act[27]) // 默认「3分钟」
     }
   }
 
@@ -98,9 +101,12 @@ class AtkModelTest {
   }
 
   @Test
-  fun parameterScreenOnlyShowsTheOriginalRows() {
+  fun parameterScreenShowsOriginalRowsPlusPauseDuration() {
     val labels = AlarmSpec.FIELDS.map { it.label }
-    assertEquals(18, labels.size)
+    // 3.6.9：原版 18 行 +「暂停时长」（扩展字段，仅「电源键按下=暂停提醒」时显示）。
+    assertEquals(19, labels.size)
+    assertTrue("暂停时长" in labels)
+    assertEquals(27, AlarmSpec.FIELDS.first { it.label == "暂停时长" }.index)
     assertTrue("播报位置" !in labels)
     assertTrue("声音模式" !in labels)
     assertTrue("延迟时间" !in labels)
