@@ -103,6 +103,9 @@ kotlin {
 dependencies {
   val composeBom = platform(libs.androidx.compose.bom)
   implementation(composeBom)
+  // androidTest 的 ui-test-junit4 / ui-test-manifest 版本由 BOM 提供，删掉这行会让 lintDebug
+  // 解析 debugAndroidTestRuntimeClasspath 时报「Could not find androidx.compose.ui:ui-test-junit4:」。
+  androidTestImplementation(composeBom)
 
   implementation(libs.androidx.core.ktx)
   implementation(libs.androidx.activity.compose)
