@@ -109,14 +109,21 @@ fun TimerApp() {
     // 3.6.7：检查到更新后先弹确认框，确定才下载（不直接下载）。
     var updateInfo by remember { mutableStateOf<AtkUpdater.ReleaseInfo?>(null) }
 
+    /**
+     * 首页列表唯一的装配入口：读库 → 按设置排序 → 重新排程。
+     * 3.7.4：首次启动、从设置 / 编辑页返回、增删改任务后都必须走这里，
+     * 不允许再直接把 store.all()（ORDER BY id）赋给 timerList。
+     */
     fun refresh() {
       val raw = try { store.all() } catch (e: Exception) { emptyList<AtkItem>() }
       // 3.7.3：启用任务排前、停用任务排后，组内再按系统设置的排序方式；
       // 排序值相同用 id 兜底，保证每次进入首页顺序完全一致。
+      // 3.7.4：整批任务共用一个「当前时间」基准，避免逐个计算时跨分钟导致顺序抖动。
+      val now = java.time.LocalDateTime.now()
       timerList = sortTimers(
         raw,
         parseTimerSortMode(prefs.getString("sort", "按执行时间")),
-      ) { item -> try { engine.nextMillis(item) } catch (e: Exception) { 0L } }
+      ) { item -> try { engine.nextMillis(item, now) } catch (e: Exception) { 0L } }
       try { engine.rescheduleAll() } catch (e: Exception) { }
     }
 
@@ -179,8 +186,11 @@ fun TimerApp() {
           store.resetBuiltInSampleStates()
           prefs.edit().putBoolean("sample_states_fixed", true).apply()
         }
-        timerList = store.all()
-        engine.rescheduleAll()
+        // 3.7.4 修复：此前这里直接把 store.all()（ORDER BY id）塞给首页列表，完全绕过了
+        // sortTimers()。内置示例 / 旧版备份里停用任务的 id 普遍更小，于是每次冷启动首页
+        // 都显示成「停用任务在前」；只有进一次系统设置再返回（BackHandler → refresh()）
+        // 才变成启用在前。首次加载与返回必须共用同一条排序路径。
+        refresh()
       } catch (e: Exception) {
         timerList = emptyList()
       }

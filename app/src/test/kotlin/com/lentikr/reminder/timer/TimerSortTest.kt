@@ -77,6 +77,49 @@ class TimerSortTest {
     )
   }
 
+  /**
+   * 3.7.4 回归：`store.all()` 是 `ORDER BY id`，内置示例与旧版备份里停用任务的 id 普遍更小。
+   * 首次冷启动若把这份原始顺序直接塞给首页，就会显示成「停用任务排前面」，只有进一次
+   * 系统设置再返回（BackHandler → refresh()）才变成启用在前。这里锁定「原始 id 序」也
+   * 必须得到启用在前的结果，防止再次出现绕过 sortTimers() 的加载路径。
+   */
+  @Test
+  fun databaseIdOrderWithDisabledIdsFirstStillPutsEnabledFirst() {
+    val raw = listOf(
+      item(1, "停用1", false),
+      item(2, "停用2", false),
+      item(3, "停用3", false),
+      item(4, "停用4", false),
+      item(5, "启用5", true),
+      item(6, "启用6", true),
+    )
+    for (mode in TimerSortMode.entries) {
+      assertEquals(
+        listOf(5L, 6L, 1L, 2L, 3L, 4L),
+        sortTimers(raw, mode, fixedNext).map { it.id },
+      )
+    }
+  }
+
+  /** 3.7.4：按执行时间的排序键每项只计算一次，且不受「当前时间」基准漂移影响。 */
+  @Test
+  fun execTimeComputesEachItemOnceAndIsStableAcrossSorts() {
+    val raw = listOf(
+      item(1, "a", false),
+      item(2, "b", true),
+      item(3, "c", true),
+      item(4, "d", false),
+    )
+    var calls = 0
+    // 每调用一次就返回不同的值：若比较器里重复求值，排序结果会随调用次数漂移。
+    val drifting: (AtkItem) -> Long = { calls++; calls.toLong() * 1_000L }
+    val first = sortTimers(raw, TimerSortMode.EXEC_TIME, drifting)
+    assertEquals(raw.size, calls)
+    val second = sortTimers(raw, TimerSortMode.EXEC_TIME, drifting)
+    assertEquals(raw.size * 2, calls)
+    assertEquals(first.map { it.id }, second.map { it.id })
+  }
+
   @Test
   fun settingLabelMapsToMode() {
     assertEquals(TimerSortMode.EXEC_TIME, parseTimerSortMode("按执行时间"))
