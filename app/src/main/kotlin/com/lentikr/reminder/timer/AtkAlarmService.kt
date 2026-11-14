@@ -69,6 +69,8 @@ class AtkAlarmService : Service() {
     const val EXTRA_FORCE = "svc_force"
     /** 标记本次 service 启动来自「贪睡重响」，用于自动贪睡计数跨重响延续、不重置。 */
     const val EXTRA_FROM_SNOOZE = "svc_from_snooze"
+    /** 3.7.3：静音时长到点后，服务还活着也要当作「全新一次响铃」重新挂载通知 / 振动 / 监听。 */
+    const val EXTRA_FRESH_MOUNT = "svc_fresh_mount"
     private const val WAKE_TIMEOUT_MS = 20 * 60 * 1000L
     // 3.6.5：自动贪睡剩余次数（按闹钟 id 保存，跨贪睡重响仍有效）。
     private val autoSnoozeLeft = mutableMapOf<Long, Int>()
@@ -90,6 +92,8 @@ class AtkAlarmService : Service() {
   private var snapDurMin = 10
   /** 3.6.9：电源键「暂停提醒」的暂停时长（分钟），来自任务扩展参数 act[27]。 */
   private var pauseDurMin = 3
+  /** 3.7.3：静音后重新执行的时长（分钟），来自任务扩展参数 act[28]。 */
+  private var muteDurMin = 3
   /** 3.7.0：本次响铃开始时的屏幕状态，用于把「第一次按电源键」识别成一次屏幕状态翻转。 */
   private var powerBaselineOn = false
   /** 3.7.1：用户解锁（USER_PRESENT）监听，独立于电源键监听，静音后也要保留。 */
@@ -112,8 +116,12 @@ class AtkAlarmService : Service() {
     val id = intent?.getLongExtra(AtkEngine.EXTRA_ID, -1L) ?: -1L
     val force = intent?.getBooleanExtra(EXTRA_FORCE, false) ?: false
     val fromSnooze = intent?.getBooleanExtra(EXTRA_FROM_SNOOZE, false) ?: false
+    val freshMountReq = intent?.getBooleanExtra(EXTRA_FRESH_MOUNT, false) ?: false
     snoozeStartId = startId
-    AtkDiag.log(this, "svc: onStartCommand action=$action id=$id force=$force fromSnooze=$fromSnooze")
+    AtkDiag.log(
+      this,
+      "svc: onStartCommand action=$action id=$id force=$force fromSnooze=$fromSnooze fresh=$freshMountReq",
+    )
 
     if (action == ACTION_STOP || action == ACTION_SNOOZE) {
       stopEverything(startId)
@@ -122,7 +130,11 @@ class AtkAlarmService : Service() {
     // 3.7.1：执行界面的「静音」按钮只静音、不终止任务。服务保持前台与通知，等用户在界面上
     // 选择贪睡 / 终止；用户解锁（USER_PRESENT）时再把界面拉到前台。
     if (action == ACTION_MUTE) {
-      muteOnly(id)
+      // 3.7.3：静音期间服务可能被系统回收重建，这里按任务参数重新解析「静音时长」，
+      // 拿到后挂一个到点重新执行的闹钟（与贪睡重响同一条链路），避免静音后再也不响。
+      val (muteItem, _) = loadItem(id)
+      val minutes = if (muteItem != null) AtkEngine(this).muteMinutes(muteItem) else muteDurMin
+      muteOnly(id, minutes)
       return START_NOT_STICKY
     }
 
@@ -151,7 +163,20 @@ class AtkAlarmService : Service() {
       }
     }
 
+    // 静音期间用户可能已解锁并停留在「只剩贪睡 / 终止」的界面上；重响时要把它刷回完整界面。
+    val faceWasVisible = freshMountReq && AtkAlarmState.faceVisible
     currentId = id
+    if (freshMountReq) {
+      // 3.7.3：静音时长到点时本服务实例仍在，mountedId 还是同一个 id，会被当成「重复启动」而
+      // 跳过补发振动 / 重新注册监听 / 拉起界面。强制按「全新一次响铃」重置这些状态。
+      AtkDiag.log(this, "svc: 静音结束，强制按新一次响铃重新挂载 id=$id")
+      AtkAlarmState.reset()
+      mountedId = -1L
+      unregisterFlipSensor()
+      unregisterPowerReceiver()
+      cancelPendingPause()
+      cancelAutoSnooze()
+    }
     acquireWakeLock()
     engine.ensureChannel()
     // 3.6.4: 屏幕模式 = 不点亮屏幕 (act[15]=0) 时，不走全屏 intent、用静默渠道，让屏幕真正不亮。
@@ -215,6 +240,9 @@ class AtkAlarmService : Service() {
     // 仅靠本服务的静默通知（V5 渠道）+ 播铃提醒。3.7.1 起用户主动解锁会由解锁监听拉起界面，
     // 不必再点通知。
     if (lightScreen && !AtkAlarmState.faceOwned) engine.launchAlarmFace(id, force, dedupe = true)
+    // 3.7.3：点亮屏模式上面已拉起非静音界面（dedupe 会跳过这里的重复请求）；不点亮屏模式
+    // 若用户此前解锁过，则在这里把界面从静音形态刷回完整形态。
+    if (faceWasVisible) engine.launchAlarmFace(id, force, muted = false, dedupe = true)
     AtkDiag.log(this, "svc: 已直接拉起执行界面 id=$id（FSI 仅兜底，全屏权限=${engine.canUseFullScreenIntent()}）")
 
     runCatching { AtkStore(this).log(id, 1, item.name) }
@@ -229,6 +257,7 @@ class AtkAlarmService : Service() {
     val snapIdx = AtkItem.intOf(item.actValue(13)).coerceIn(0, AtkOptions.SNAP_DUR.lastIndex)
     snapDurMin = snapMinutes(AtkOptions.SNAP_DUR[snapIdx]) // 预设时间（存的是选项索引）
     pauseDurMin = engine.pauseMinutes(item) // 3.6.9：暂停提醒的恢复时长（act[27]）
+    muteDurMin = engine.muteMinutes(item) // 3.7.3：静音后的恢复时长（act[28]）
     // 3.7.1：记录响铃开始时的屏幕状态作为基线。屏幕状态翻转仍是电源键的代理，但 SCREEN_ON
     // （亮屏）要等 1.1 秒判断是否随后解锁：解锁则交给执行界面，不解锁才按设置暂停。
     powerBaselineOn = try {
@@ -436,8 +465,10 @@ class AtkAlarmService : Service() {
    * 3.7.1：静音 ≠ 终止。只停铃声 / 振动，注销翻转、电源键与自动贪睡（避免静音后又自动响），
    * 但**不 dismiss、不 stopSelf**：任务仍在，前台服务与解锁监听保留，用户解锁后能看到「只剩
    * 贪睡 / 终止」的执行界面；点贪睡 / 终止才真正结束。
+   * 3.7.3：另外挂一个「静音时长」到点重新执行的闹钟 —— 静音后睡着也不会永远不响。
+   * 用户随后点贪睡 / 终止时，AtkEngine.dismiss 会取消这个闹钟。
    */
-  private fun muteOnly(id: Long) {
+  private fun muteOnly(id: Long, minutes: Int = muteDurMin) {
     currentId = id
     AtkAlarmState.mutedId = id
     AtkAlarmSound.stop()
@@ -447,7 +478,8 @@ class AtkAlarmService : Service() {
     cancelAutoSnooze()
     // 服务若因静音才被拉起（前台服务此前已被系统回收），这里也要补上解锁监听。
     registerUnlockReceiver(id)
-    AtkDiag.log(this, "svc: 已静音，保留任务与执行界面 id=$id")
+    AtkEngine(this).armMuteResume(id, minutes)
+    AtkDiag.log(this, "svc: 已静音，保留任务与执行界面，${minutes} 分钟后重新执行 id=$id")
   }
 
   /**

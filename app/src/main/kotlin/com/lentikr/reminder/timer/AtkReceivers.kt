@@ -570,6 +570,26 @@ class AtkReceiver : BroadcastReceiver() {
         }
       }
 
+      // 3.7.3：静音时长到点 —— 像贪睡一样重新执行本次任务（声音 + 振动 + 通知 / 执行界面）。
+      // 静音期间服务还活着，所以 freshMount=true 让服务按「全新一次响铃」重置状态、解除静音形态。
+      "app.lentikr.reminder.ATK_MUTE_RESUME" -> {
+        // 状态重置交给前台服务的 freshMount 分支：它要先读到 faceVisible，才能把用户已打开的
+        // 静音界面刷回完整形态。这里不提前 reset。
+        val item = if (id >= 0) store.get(id) else null
+        AtkDiag.log(context, "静音结束，重新执行 id=$id 任务=${item?.name}")
+        if (item != null && item.enabled) {
+          engine.ensureChannel()
+          AtkAlarmSound.play(
+            context, item,
+            delayMs = engine.globalWaitMs(),
+            vibrateOverride = engine.globalVibrate(),
+          )
+          startAlarmService(context, engine, id, false, fromSnooze = true, freshMount = true)
+          AtkDiag.log(context, "全屏通知: 静音结束后已重新挂载 id=$id")
+          store.log(id, 1, item.name + " 静音后继续")
+        }
+      }
+
       AtkEngine.ACTION_SNOOZE -> {
         // 3.7.1：手动贪睡 = 选择贪睡时间时，执行界面会带上选中的分钟数；0 / 缺省用「预设时间」。
         val customMin = intent.getIntExtra(AtkEngine.EXTRA_SNOOZE_MINUTES, 0)
@@ -626,12 +646,15 @@ class AtkReceiver : BroadcastReceiver() {
     id: Long,
     force: Boolean,
     fromSnooze: Boolean = false,
+    freshMount: Boolean = false,
   ) {
     val svc = Intent(context, AtkAlarmService::class.java).apply {
       putExtra(AtkAlarmService.EXTRA_ACTION, AtkAlarmService.ACTION_START)
       putExtra(AtkEngine.EXTRA_ID, id)
       putExtra(AtkAlarmService.EXTRA_FORCE, force)
       putExtra(AtkAlarmService.EXTRA_FROM_SNOOZE, fromSnooze)
+      // 3.7.3：静音重响时服务实例仍在，需要强制按新一次响铃重新挂载。
+      putExtra(AtkAlarmService.EXTRA_FRESH_MOUNT, freshMount)
     }
     try {
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -1097,12 +1120,14 @@ private fun AlarmFace(
         }
       }
       Spacer(Modifier.weight(1f))
-      // 3.7.2：滑动方式两端是「图标 + 文字」的贪睡 / 终止按钮，中间的滑块可真实左右拖动；
-      // 按钮方式静音后剩下两个按钮同样保留文字（不再只有图标）。两条路径都只提供这两个动作。
+      // 3.7.3：滑动方式恢复原版「↑ 静音」，静音后只剩贪睡 / 终止两个带文字的按钮；
+      // 按钮方式静音后同样只去掉静音按钮。三条动作路径都受静音时长保护，到点会重新响铃。
       if (uiStyle == 0) {
         AlarmFaceSlider(
           onSnooze = { requestSnooze() },
           onStop = { requestStop() },
+          onMute = { requestMute() },
+          muted = muted,
         )
       } else {
         Row(
@@ -1216,11 +1241,18 @@ private fun AlarmFaceButton(
 }
 
 /**
- * 3.7.2：原版滑动条 —— 两端是与按钮方式相同的「图标 + 文字」按钮，中间灰色滑块可真实左右拖动。
+ * 3.7.3：原版滑动条 —— 两端是与按钮方式相同的「图标 + 文字」按钮，中间灰色滑块可真实左右拖动。
  * 拖过阈值松手即执行（左 = 贪睡、右 = 终止），幅度不足则回弹到中间；两端按钮也可直接点击。
+ * 「↑ 上滑静音」按原版恢复：静音后不再显示静音入口，只剩贪睡 / 终止两个选项，
+ * 且服务会在「静音时长」到点时重新响铃。
  */
 @Composable
-private fun AlarmFaceSlider(onSnooze: () -> Unit, onStop: () -> Unit) {
+private fun AlarmFaceSlider(
+  onSnooze: () -> Unit,
+  onStop: () -> Unit,
+  onMute: () -> Unit,
+  muted: Boolean,
+) {
   var dragX by remember { mutableStateOf(0f) }
   var trackWidth by remember { mutableStateOf(0f) }
   // 滑块最多移到左右目标区中心（整条宽度的 1/3），越过 55% 即判定为已选择。
@@ -1233,19 +1265,27 @@ private fun AlarmFaceSlider(onSnooze: () -> Unit, onStop: () -> Unit) {
       .background(Brush.verticalGradient(listOf(Color(0xFF3A3A3A), Color(0xFF1A1A1A))))
       .border(1.dp, Color(0xFF555555))
       .onSizeChanged { trackWidth = it.width.toFloat() }
-      .pointerInput(maxX, threshold) {
+      .pointerInput(maxX, threshold, muted) {
+        var dx = 0f
+        var dy = 0f
         detectDragGestures(
-          onDragStart = { },
+          onDragStart = { dx = 0f; dy = 0f },
           onDrag = { _, delta ->
+            dx += delta.x
+            dy += delta.y
             if (maxX > 0f) dragX = (dragX + delta.x).coerceIn(-maxX, maxX)
           },
           onDragEnd = {
-            val choice = slideChoice(dragX, threshold)
+            val finalX = dragX
             dragX = 0f
-            when (choice) {
-              SlideChoice.SNOOZE -> onSnooze()
-              SlideChoice.STOP -> onStop()
-              SlideChoice.NONE -> Unit
+            if (!muted && dy < -60f && dy * dy > dx * dx) {
+              onMute()
+            } else {
+              when (slideChoice(finalX, threshold)) {
+                SlideChoice.SNOOZE -> onSnooze()
+                SlideChoice.STOP -> onStop()
+                SlideChoice.NONE -> Unit
+              }
             }
           },
           onDragCancel = { dragX = 0f },
@@ -1271,7 +1311,8 @@ private fun AlarmFaceSlider(onSnooze: () -> Unit, onStop: () -> Unit) {
         AlarmFaceButton("ⓘ", "终止", Modifier.weight(1f)) { onStop() }
       }
       Text(
-        "← 贪睡    拖动滑块    终止 →",
+        if (muted) "← 贪睡    拖动滑块    终止 →"
+        else "↑ 静音    ← 贪睡    终止 →",
         color = Color(0xFFCFCFCF),
         fontSize = 13.sp,
         modifier = Modifier.align(Alignment.CenterHorizontally).padding(bottom = 10.dp),

@@ -365,6 +365,17 @@ class AtkEngine(private val context: Context) {
     return n.coerceIn(1, 60)
   }
 
+  /**
+   * 3.7.3：「静音时长」(act[28]，扩展字段) 解析为分钟数。旧版 AddinTimer 备份没有第 29 个字段时
+   * 兜底为 3 分钟（与默认选项一致），不改动任何原有字段，因此新版导入旧数据依然 100% 兼容。
+   */
+  fun muteMinutes(item: AtkItem): Int {
+    val raw = item.act.getOrNull(28)?.takeIf { it.isNotBlank() } ?: "2"
+    val idx = AtkItem.intOf(raw).coerceIn(0, AtkOptions.MUTE_DUR.lastIndex)
+    val n = AtkOptions.MUTE_DUR[idx].filter { it.isDigit() }.toIntOrNull() ?: 3
+    return n.coerceIn(1, 60)
+  }
+
   /** 暂停后继续执行的 PendingIntent。requestCode 与 fire / snooze 错开，避免互相覆盖。 */
   private fun pauseResumeIntent(id: Long): PendingIntent =
     PendingIntent.getBroadcast(
@@ -404,6 +415,48 @@ class AtkEngine(private val context: Context) {
       AtkDiag.log(context, "暂停: 已取消挂起的继续 id=$id")
     } catch (e: Exception) {
       AtkDiag.log(context, "暂停: 取消继续失败 id=$id ${e.message}")
+    }
+  }
+
+  /** 3.7.3：静音后重新执行的 PendingIntent，requestCode 与 fire / 贪睡 / 暂停恢复都错开。 */
+  private fun muteResumeIntent(id: Long): PendingIntent =
+    PendingIntent.getBroadcast(
+      context, (id * 7 + 14).toInt(),
+      Intent(context, AtkReceiver::class.java).apply {
+        this.action = "app.lentikr.reminder.ATK_MUTE_RESUME"
+        putExtra(EXTRA_ID, id)
+      },
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
+  /**
+   * 3.7.3：静音（按钮 / 翻转 / 上滑）只停声音，但「静音时长」到点必须重新响铃、振动并拉起界面，
+   * 否则用户静音后睡着，这个闹钟就失去唤醒作用。用 setAlarmClock 保证深睡 / Doze 下准时恢复。
+   */
+  fun armMuteResume(id: Long, minutes: Int) {
+    val m = minutes.coerceIn(1, 60)
+    val pi = muteResumeIntent(id)
+    val at = System.currentTimeMillis() + m * 60 * 1000L
+    val aci = AlarmManager.AlarmClockInfo(at, pi)
+    try {
+      alarms.setAlarmClock(aci, pi)
+    } catch (e: SecurityException) {
+      try {
+        alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+      } catch (e2: SecurityException) {
+        alarms.set(AlarmManager.RTC_WAKEUP, at, pi)
+      }
+    }
+    AtkDiag.log(context, "静音: 已挂 ${m} 分钟后重新执行 id=$id")
+  }
+
+  /** 用户终止 / 贪睡 / 再次触发时清掉挂起的「静音后继续」，避免关掉后又自己响。 */
+  fun cancelMuteResume(id: Long) {
+    try {
+      alarms.cancel(muteResumeIntent(id))
+      AtkDiag.log(context, "静音: 已取消挂起的重新执行 id=$id")
+    } catch (e: Exception) {
+      AtkDiag.log(context, "静音: 取消重新执行失败 id=$id ${e.message}")
     }
   }
 
@@ -880,6 +933,8 @@ class AtkEngine(private val context: Context) {
     cancelSnooze(id)
     // 3.6.9：清除挂起的「暂停后继续」，用户既然已结束本次执行就不该再自动响。
     cancelPauseResume(id)
+    // 3.7.3：同理清掉挂起的「静音后继续执行」。
+    cancelMuteResume(id)
   }
 
   /** Whether Android still lets this app launch a full-screen Activity over the keyguard. */

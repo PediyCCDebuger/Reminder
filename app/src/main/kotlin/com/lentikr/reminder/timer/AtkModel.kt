@@ -60,6 +60,8 @@ object AtkOptions {
   val POWER_STYLE = listOf("暂停提醒", "自动贪睡")
   // 3.6.9：电源键按下 = 暂停提醒时，暂停多久后自动继续执行本次任务（不再是「一停了之」）。
   val PAUSE_DUR = listOf("1分钟", "2分钟", "3分钟", "5分钟", "10分钟", "15分钟", "30分钟")
+  // 3.7.3：静音（按钮 / 翻转 / 上滑）多久后重新执行任务，避免「静音后睡着就再也不响」。
+  val MUTE_DUR = listOf("1分钟", "2分钟", "3分钟", "5分钟", "10分钟", "15分钟", "30分钟")
   val UI_STYLE = listOf("滑动方式", "按钮方式")
 
   val KINDS = listOf(
@@ -125,6 +127,10 @@ object AlarmSpec {
     // 前 27 个，多出的这一项会被忽略，因此导出/导入旧数据不丢字段；本 App 解析时保留全部字段。
     // 仅当 act[25] 选中「暂停提醒」时显示（见 AtkEditUi）。
     ActSpec(27, "暂停时长", FieldKind.SELECT, AtkOptions.PAUSE_DUR, SECTION_UI),
+    // 3.7.3：新增扩展字段 act[28]。静音后超过该时长会像贪睡一样重新执行任务。
+    // 用户明确：只需本 App 100% 可读旧版 AddinTimer 备份，不要求新版备份能被旧版读取；
+    // 旧数据没有这两个扩展字段时由 AtkEngine 按默认值兜底，不会丢任何原有字段。
+    ActSpec(28, "静音时长", FieldKind.SELECT, AtkOptions.MUTE_DUR, SECTION_UI),
     ActSpec(24, "手动贪睡", FieldKind.SELECT, AtkOptions.HAND_SNAP, SECTION_UI),
     ActSpec(16, "终止确认", FieldKind.SELECT, AtkOptions.TIP_CLOSE, SECTION_UI),
     // 其他设置
@@ -169,6 +175,7 @@ object AlarmSpec {
     "0", // 25 r
     "0", // 26 x
     "2", // 27 扩展：暂停时长索引（默认「3分钟」），旧数据缺此项时 AtkEngine.pauseMinutes 兜底为 3 分钟
+    "2", // 28 扩展：静音时长索引（默认「3分钟」），旧数据缺此项时 AtkEngine.muteMinutes 兜底为 3 分钟
   )
 }
 

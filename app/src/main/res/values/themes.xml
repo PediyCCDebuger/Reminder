@@ -6,10 +6,9 @@
         <item name="android:windowBackground">@color/window_background</item>
     </style>
 
-    <style name="Theme.Reminder.Starting" parent="Theme.SplashScreen">
-        <item name="windowSplashScreenBackground">@color/window_background</item>
-        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
-        <item name="postSplashScreenTheme">@style/Theme.Reminder</item>
+    <!-- 3.7.3：上游 SplashScreen API 依赖已移除，启动主题直接用系统主题 + 窗口背景。 -->
+    <style name="Theme.Reminder.Starting" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
     </style>
 
     <!-- 任务执行界面: black system bars with light icons, matching the original full-screen

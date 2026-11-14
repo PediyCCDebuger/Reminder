@@ -111,13 +111,12 @@ fun TimerApp() {
 
     fun refresh() {
       val raw = try { store.all() } catch (e: Exception) { emptyList<AtkItem>() }
-      // 3.6.4：按「任务排序方式」设置排序，默认按执行时间（下次响铃时间）。
-      val sortMode = prefs.getString("sort", "按执行时间") ?: "按执行时间"
-      timerList = when (sortMode) {
-        "按名称" -> raw.sortedBy { it.name.lowercase() }
-        "按创建时间" -> raw.sortedBy { it.id }
-        else -> raw.sortedBy { try { engine.nextMillis(it) } catch (e: Exception) { 0L } }
-      }
+      // 3.7.3：启用任务排前、停用任务排后，组内再按系统设置的排序方式；
+      // 排序值相同用 id 兜底，保证每次进入首页顺序完全一致。
+      timerList = sortTimers(
+        raw,
+        parseTimerSortMode(prefs.getString("sort", "按执行时间")),
+      ) { item -> try { engine.nextMillis(item) } catch (e: Exception) { 0L } }
       try { engine.rescheduleAll() } catch (e: Exception) { }
     }
 

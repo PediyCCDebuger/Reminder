@@ -973,7 +973,13 @@ private fun ParamTab(draft: AtkItem, change: (() -> Unit) -> Unit, onMessage: (S
           AtkSection(spec.section)
           lastSection = spec.section
         }
-        val raw = draft.actValue(spec.index)
+        // 3.7.3：旧备份没有扩展参数 act[27]/act[28] 时，界面要显示与引擎兜底一致的默认值
+        // （3 分钟），否则会显示成索引 0 的「1分钟」，让用户误以为设置不生效。
+        val raw = if (spec.index >= 27 && draft.actValue(spec.index).isBlank()) {
+          AlarmSpec.DEFAULTS.getOrElse(spec.index) { "" }
+        } else {
+          draft.actValue(spec.index)
+        }
         when (spec.kind) {
           FieldKind.SELECT -> {
             val cur = AtkItem.intOf(raw).coerceIn(0, spec.options.lastIndex.coerceAtLeast(0))

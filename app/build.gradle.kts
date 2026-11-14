@@ -3,10 +3,6 @@ import java.util.Properties
 plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.compose.compiler)
-  alias(libs.plugins.kotlin.serialization)
-  alias(libs.plugins.ksp)
-  alias(libs.plugins.hilt)
-  alias(libs.plugins.room3)
 }
 
 // Release signing is read from keystore.properties (kept out of VCS) or, on CI, from env vars.
@@ -28,8 +24,8 @@ android {
     applicationId = "app.lentikr.reminder"
     minSdk = 29
     targetSdk = 37
-    versionCode = 49
-    versionName = "3.7.2"
+    versionCode = 50
+    versionName = "3.7.3"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -94,7 +90,6 @@ kotlin {
     optIn.addAll(
       "androidx.compose.material3.ExperimentalMaterial3Api",
       "androidx.compose.material3.ExperimentalMaterial3ExpressiveApi",
-      "androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi",
     )
     // Opt in to the upcoming default: annotations on constructor properties (e.g. @DrawableRes,
     // @ApplicationContext) go to both the parameter and the field. See KT-73255.
@@ -102,56 +97,30 @@ kotlin {
   }
 }
 
-room3 {
-  schemaDirectory("$projectDir/schemas")
-}
-
+// 3.7.3：上游纪念日应用的代码已从仓库移除，Hilt / Room 3 / DataStore / Navigation 3 /
+// kotlinx.serialization / tyme4kt / SplashScreen / adaptive 等仅由它使用的依赖一并删除。
+// 农历换算由本地 Java 源码 cn.nnci.addintimer.Lunar 提供，不依赖任何第三方库。
 dependencies {
   val composeBom = platform(libs.androidx.compose.bom)
   implementation(composeBom)
-  androidTestImplementation(composeBom)
 
   implementation(libs.androidx.core.ktx)
-  implementation(libs.androidx.core.splashscreen)
   implementation(libs.androidx.activity.compose)
   implementation(libs.androidx.lifecycle.runtime.compose)
-  implementation(libs.androidx.lifecycle.viewmodel.compose)
 
-  // Compose
+  // TimerApp 自带 AtkTheme 深色主题，只用基础 Compose + Material3。
   implementation(libs.androidx.compose.ui)
-  implementation(libs.androidx.compose.ui.tooling.preview)
   implementation(libs.androidx.compose.material3)
-  implementation(libs.androidx.compose.material3.adaptive.navigation3)
   debugImplementation(libs.androidx.compose.ui.tooling)
 
-  // Navigation 3
-  implementation(libs.androidx.navigation3.runtime)
-  implementation(libs.androidx.navigation3.ui)
-  implementation(libs.androidx.lifecycle.viewmodel.navigation3)
-
-  // DI
-  implementation(libs.hilt.android)
-  ksp(libs.hilt.compiler)
-  implementation(libs.androidx.hilt.lifecycle.viewmodel.compose)
-
-  // Persistence
-  implementation(libs.androidx.room3.runtime)
-  ksp(libs.androidx.room3.compiler)
-  implementation(libs.androidx.datastore.preferences)
-  implementation(libs.kotlinx.serialization.json)
   // 3.6.4：自动更新 / 协程作用域（Dispatchers.Main + IO）需要 Android 版协程。
   implementation(libs.kotlinx.coroutines.android)
 
-  // Chinese lunar calendar
-  implementation(libs.tyme)
-
   testImplementation(libs.junit)
-  testImplementation(libs.kotlinx.coroutines.test)
 
   androidTestImplementation(libs.androidx.compose.ui.test.junit4)
   debugImplementation(libs.androidx.compose.ui.test.manifest)
   androidTestImplementation(libs.androidx.test.core)
   androidTestImplementation(libs.androidx.test.ext.junit)
   androidTestImplementation(libs.androidx.test.runner)
-  androidTestImplementation(libs.kotlinx.coroutines.test)
 }
