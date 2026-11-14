@@ -29,6 +29,24 @@ class TimerSortTest {
     }
   }
 
+  /**
+   * 3.7.5：中文名称按拼音序。字符串默认的 Unicode 码点序会把「中」(U+4E2D) 排到
+   * 「安」(U+5B89) 前面，对中文用户近乎乱序；拼音序应为 an < bei < zao < zhong。
+   */
+  @Test
+  fun nameModeSortsChineseByPinyinInsteadOfUnicode() {
+    val raw = listOf(
+      item(1, "早起床", true),
+      item(2, "中", true),
+      item(3, "北", true),
+      item(4, "安", true),
+    )
+    assertEquals(
+      listOf("安", "北", "早起床", "中"),
+      sortTimers(raw, TimerSortMode.NAME, fixedNext).map { it.name },
+    )
+  }
+
   @Test
   fun nameModeSortsCaseInsensitivelyInsideEachGroup() {
     val raw = listOf(

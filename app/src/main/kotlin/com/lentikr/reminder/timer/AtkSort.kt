@@ -1,5 +1,6 @@
 package com.lentikr.reminder.timer
 
+import java.text.Collator
 import java.util.Locale
 
 /**
@@ -10,6 +11,9 @@ import java.util.Locale
  * 3.7.4：所有进入首页的路径都必须调用本函数（见 AtkUi.refresh）。另外「按执行时间」的
  * 排序键改为一次性预计算，避免比较器里反复计算循环 / 农历规则、也避免每次取到不同的
  * 「当前时间」基准导致比较结果不一致。
+ *
+ * 3.7.5：「按名称」改用 `Collator(Locale.CHINA)` 让中文按拼音排序，不再是 Unicode 码点序；
+ * 大小写差异仍被忽略，同名 / 同音由 id 兜底。
  */
 internal enum class TimerSortMode { EXEC_TIME, CREATED, NAME }
 
@@ -42,8 +46,15 @@ internal fun sortTimers(
   }
 
   val byMode: Comparator<AtkItem> = when (mode) {
-    // 用 ROOT 而非系统默认 locale，避免土耳其语等 locale 下大小写转换影响名称顺序。
-    TimerSortMode.NAME -> compareBy<AtkItem> { it.name.lowercase(Locale.ROOT) }
+    // 3.7.5：中文按拼音序，而不是字符串默认的 Unicode 码点序（后者对中文近乎乱序）。
+    // Collator 非线程安全，所以每次排序新建实例；SECONDARY 忽略大小写（A/a 同级），
+    // 同时仍区分重音 / 声调，完全相同的名称由外层的 id 兜底保持顺序稳定。
+    TimerSortMode.NAME -> {
+      val collator = Collator.getInstance(Locale.CHINA).apply {
+        strength = Collator.SECONDARY
+      }
+      Comparator<AtkItem> { a, b -> collator.compare(a.name, b.name) }
+    }
     // timer.id 是 INTEGER PRIMARY KEY AUTOINCREMENT：单调递增、删除后不复用；导入旧版
     // .atk 时保留原 id。因此 id 顺序等价于创建顺序，可用作「按创建时间」的排序键。
     TimerSortMode.CREATED -> compareBy<AtkItem> { it.id }
