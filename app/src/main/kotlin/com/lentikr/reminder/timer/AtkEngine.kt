@@ -547,6 +547,9 @@ class AtkEngine(private val context: Context) {
     val ms = nextMillis(item)
     if (ms <= 0) {
       alarms.cancel(pi)
+      // 3.7.6：启用任务若已无任何未来执行时间（一次性任务执行完成、倒计时过期等），
+      // 自动置为未激活。所有触发后重排程路径都经过这里，集中处理避免遗漏。
+      if (shouldAutoDisableExpired(item, ms)) disableExpired(item)
       return
     }
     // 3.6.1：排程统一走 [setExactAlarm]，其主路径是 setAlarmClock（对齐 Smart Alarm-v2.7.7，
@@ -557,6 +560,18 @@ class AtkEngine(private val context: Context) {
     // 故 setAlarmClock + 直接 startActivity 正好等价于 Smart Alarm 的可用组合。
     // 3.6.0：排程日志不再打印任务名（隐私），改为在 rescheduleAll 处汇总一行。
     setExactAlarm(ms, pi, item.id)
+  }
+
+  /** 3.7.6：彻底到期后落库停用；只写固定文案，不把任务名写进日志。 */
+  private fun disableExpired(item: AtkItem) {
+    item.enabled = false
+    try {
+      store.save(item)
+      store.log(item.id, 0, "任务已到期，自动停用")
+      AtkDiag.log(context, "任务已到期，自动停用 id=#${item.id}")
+    } catch (e: Exception) {
+      AtkDiag.log(context, "任务到期自动停用失败 id=#${item.id}: ${e.message}")
+    }
   }
 
   /**

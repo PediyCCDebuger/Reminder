@@ -99,6 +99,8 @@ fun TimerApp() {
     var contextItem by remember { mutableStateOf<AtkItem?>(null) }
     var deleteTarget by remember { mutableStateOf<AtkItem?>(null) }
     var activateTarget by remember { mutableStateOf<AtkItem?>(null) }
+    // 3.7.6：过期一次性任务保存确认；命中时暂停落库，留在编辑页等待用户决定。
+    var expiredSaveTarget by remember { mutableStateOf<AtkItem?>(null) }
     var planItem by remember { mutableStateOf<AtkItem?>(null) }
     var logItem by remember { mutableStateOf<AtkItem?>(null) }
     var moveItem by remember { mutableStateOf<AtkItem?>(null) }
@@ -115,6 +117,9 @@ fun TimerApp() {
      * 不允许再直接把 store.all()（ORDER BY id）赋给 timerList。
      */
     fun refresh() {
+      // 3.7.6：先重排程（其中会把已彻底到期的启用任务自动停用），再读库装配首页，
+      // 保证本次进入首页就能看到停用状态，不需要再进一次设置页刷新。
+      try { engine.rescheduleAll() } catch (e: Exception) { }
       val raw = try { store.all() } catch (e: Exception) { emptyList<AtkItem>() }
       // 3.7.3：启用任务排前、停用任务排后，组内再按系统设置的排序方式；
       // 排序值相同用 id 兜底，保证每次进入首页顺序完全一致。
@@ -124,7 +129,15 @@ fun TimerApp() {
         raw,
         parseTimerSortMode(prefs.getString("sort", "按执行时间")),
       ) { item -> try { engine.nextMillis(item, now) } catch (e: Exception) { 0L } }
-      try { engine.rescheduleAll() } catch (e: Exception) { }
+    }
+
+    /** 3.7.6：统一保存入口；过期一次性任务确认后传 askActivation=false，不再追问激活。 */
+    fun saveTask(item: AtkItem, askActivation: Boolean = true) {
+      tab = item.pageIndex()
+      store.save(item)
+      refresh()
+      screen = Screen.LIST
+      if (askActivation && !item.enabled) activateTarget = item
     }
 
     /** Persist a new tag list and keep the current tab inside its bounds. */
@@ -305,12 +318,14 @@ fun TimerApp() {
           preset = preset,
           page = tab,
           onSave = { item ->
-            tab = item.pageIndex()
-            store.save(item)
-            refresh()
-            screen = Screen.LIST
-            // 3.2.0：保存一个停用的任务后，询问是否立即激活（新建或编辑停用任务都会触发）。
-            if (!item.enabled) activateTarget = item
+            // 3.7.6：一次性任务（指定日期 / 倒计时）若当前规则已无未来执行时间，
+            // 先提醒；用户仍保存时按未激活落库，不再弹出「是否激活」。
+            val next = try { engine.nextMillis(item, java.time.LocalDateTime.now()) } catch (e: Exception) { 0L }
+            if (needsInactiveSaveWarning(item, next)) {
+              expiredSaveTarget = item
+            } else {
+              saveTask(item)
+            }
           },
           onClose = { screen = Screen.LIST },
           onMessage = { message = it },
@@ -518,6 +533,23 @@ fun TimerApp() {
           deleteTarget = null
         },
         dismissText = "取消",
+      )
+    }
+
+    expiredSaveTarget?.let { task ->
+      AtkMessageDialog(
+        title = "任务永远不会执行",
+        body = "「${task.name}」是一次性任务，当前设置已没有未来执行时间：" +
+          "指定日期早于今天，或今天的执行时间已经过去。若仍保存，将设为未激活状态。",
+        onDismiss = { expiredSaveTarget = null },
+        confirmText = "仍然保存",
+        onConfirm = {
+          expiredSaveTarget = null
+          task.enabled = false
+          saveTask(task, askActivation = false)
+          toast(context, "已按未激活状态保存「${task.name.ifBlank { "未命名" }}」")
+        },
+        dismissText = "返回修改",
       )
     }
 

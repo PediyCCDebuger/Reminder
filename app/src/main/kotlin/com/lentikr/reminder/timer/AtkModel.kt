@@ -428,3 +428,19 @@ fun labelsOf(options: List<String>, selected: Set<Int>): String {
   if (selected.isEmpty()) return "未选择"
   return selected.sorted().filter { it in options.indices }.joinToString("、") { options[it] }
 }
+
+/**
+ * 3.7.6：排程时若启用任务已无任何未来执行时间，说明它已经彻底到期，
+ * 必须自动改为未激活，避免首页仍显示绿色开关却永远不会响。
+ */
+fun shouldAutoDisableExpired(item: AtkItem, nextMillis: Long): Boolean =
+  item.enabled && nextMillis <= 0L
+
+/**
+ * 3.7.6：保存一次性任务（指定日期 / 倒计时目标日期）时，如果当前规则已无未来执行时间，
+ * 应提示用户；用户仍保存时按未激活落库。循环任务不触发此提示。
+ */
+fun needsInactiveSaveWarning(item: AtkItem, nextMillis: Long): Boolean {
+  if (!item.enabled || nextMillis > 0L) return false
+  return item.rule.mode == Rule.MODE_ONCE || item.rule.mode == Rule.MODE_TARGET
+}

@@ -1,5 +1,6 @@
 package com.lentikr.reminder.timer
 
+import cn.nnci.addintimer.Rule
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -139,5 +140,27 @@ class AtkModelTest {
     assertTrue("间隔时间" !in labels)
     assertEquals("播报时间", labels.first())
     assertEquals("提醒备注", labels.last())
+  }
+
+  @Test
+  fun enabledTaskWithoutFutureIsAutoDisabled() {
+    val item = AtkItem.newAlarm(0, 0)
+    assertTrue(shouldAutoDisableExpired(item, 0L))
+    assertFalse(shouldAutoDisableExpired(item, 1L))
+    item.enabled = false
+    assertFalse(shouldAutoDisableExpired(item, 0L))
+  }
+
+  @Test
+  fun expiredOneShotNeedsInactiveSaveWarningButRecurringDoesNot() {
+    val once = AtkItem.newAlarm(0, 0).apply { rule.mode = Rule.MODE_ONCE }
+    assertTrue(needsInactiveSaveWarning(once, 0L))
+    assertFalse(needsInactiveSaveWarning(once, 1L))
+
+    val target = AtkItem.newAlarm(0, 0).apply { rule.mode = Rule.MODE_TARGET }
+    assertTrue(needsInactiveSaveWarning(target, 0L))
+
+    val days = AtkItem.newAlarm(0, 0).apply { rule.mode = Rule.MODE_DAYS }
+    assertFalse(needsInactiveSaveWarning(days, 0L))
   }
 }

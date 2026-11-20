@@ -31,6 +31,15 @@ class OccurrenceTest {
   }
 
   @Test
+  fun targetModeInThePastHasNoNextOccurrence() {
+    val r = Rule().apply {
+      mode = Rule.MODE_TARGET
+      ey = 2026; em = 11; ed = 11
+    }
+    assertNull(Occurrence.first(r, 7, 40, now))
+  }
+
+  @Test
   fun targetModeFiresOnTheTargetDate() {
     val r = Rule().apply {
       mode = Rule.MODE_TARGET
