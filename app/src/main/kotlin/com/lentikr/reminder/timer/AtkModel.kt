@@ -2,6 +2,8 @@ package com.lentikr.reminder.timer
 
 import cn.nnci.addintimer.Lunar
 import cn.nnci.addintimer.Rule
+import java.time.LocalDate
+import java.time.LocalDateTime
 import java.util.Locale
 
 /**
@@ -437,10 +439,26 @@ fun shouldAutoDisableExpired(item: AtkItem, nextMillis: Long): Boolean =
   item.enabled && nextMillis <= 0L
 
 /**
- * 3.7.6：保存一次性任务（指定日期 / 倒计时目标日期）时，如果当前规则已无未来执行时间，
- * 应提示用户；用户仍保存时按未激活落库。循环任务不触发此提示。
+ * 3.7.7：保存一次性任务（指定日期 / 倒计时目标日期）时，如果指定日期早于今天，
+ * 或当前规则已无未来执行时间，应提示用户；用户仍保存时按未激活落库。
+ *
+ * 3.7.6 曾额外要求 item.enabled 且信任 nextMillis，实机上编辑已停用任务或引擎时间基准
+ * 略有偏差时会漏弹；这里改为直接读规则日期，更贴近用户所说的「指定日期早于当前日期」。
  */
-fun needsInactiveSaveWarning(item: AtkItem, nextMillis: Long): Boolean {
-  if (!item.enabled || nextMillis > 0L) return false
-  return item.rule.mode == Rule.MODE_ONCE || item.rule.mode == Rule.MODE_TARGET
+fun needsInactiveSaveWarning(
+  item: AtkItem,
+  nextMillis: Long,
+  after: LocalDateTime = LocalDateTime.now(),
+): Boolean {
+  val r = item.rule
+  if (r.mode != Rule.MODE_ONCE && r.mode != Rule.MODE_TARGET) return false
+  // 倒计时「从现在开始」由保存时刻重新锚定，指定日期字段不参与。
+  if (r.mode == Rule.MODE_TARGET && r.hourCycle != 0) return false
+  val date = if (r.mode == Rule.MODE_ONCE) {
+    LocalDate.of(r.sy, r.sm, r.sd)
+  } else {
+    LocalDate.of(r.ey, r.em, r.ed)
+  }
+  val dateInPast = try { date.isBefore(after.toLocalDate()) } catch (e: Exception) { false }
+  return dateInPast || nextMillis <= 0L
 }

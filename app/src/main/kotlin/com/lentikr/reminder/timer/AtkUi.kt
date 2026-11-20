@@ -320,8 +320,9 @@ fun TimerApp() {
           onSave = { item ->
             // 3.7.6：一次性任务（指定日期 / 倒计时）若当前规则已无未来执行时间，
             // 先提醒；用户仍保存时按未激活落库，不再弹出「是否激活」。
-            val next = try { engine.nextMillis(item, java.time.LocalDateTime.now()) } catch (e: Exception) { 0L }
-            if (needsInactiveSaveWarning(item, next)) {
+            val now = java.time.LocalDateTime.now()
+            val next = try { engine.nextMillis(item, now) } catch (e: Exception) { 0L }
+            if (needsInactiveSaveWarning(item, next, now)) {
               expiredSaveTarget = item
             } else {
               saveTask(item)

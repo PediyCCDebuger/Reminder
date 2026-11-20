@@ -2,6 +2,7 @@ package com.lentikr.reminder.timer
 
 import cn.nnci.addintimer.Rule
 import org.junit.Assert.assertEquals
+import java.time.LocalDateTime
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -152,15 +153,37 @@ class AtkModelTest {
   }
 
   @Test
-  fun expiredOneShotNeedsInactiveSaveWarningButRecurringDoesNot() {
-    val once = AtkItem.newAlarm(0, 0).apply { rule.mode = Rule.MODE_ONCE }
-    assertTrue(needsInactiveSaveWarning(once, 0L))
-    assertFalse(needsInactiveSaveWarning(once, 1L))
+  fun expiredOneShotNeedsInactiveSaveWarningEvenIfDisabledOrNextMillisMisleading() {
+    val now = LocalDateTime.of(2026, 11, 20, 9, 30)
+    val once = AtkItem.newAlarm(0, 0).apply {
+      rule.mode = Rule.MODE_ONCE
+      rule.sy = 2026; rule.sm = 11; rule.sd = 11
+    }
+    // 3.7.7：直接按指定日期判定，不再要求 enabled，也不被 nextMillis 的偶发偏差带偏。
+    assertTrue(needsInactiveSaveWarning(once, 1L, now))
+    once.enabled = false
+    assertTrue(needsInactiveSaveWarning(once, 1L, now))
 
-    val target = AtkItem.newAlarm(0, 0).apply { rule.mode = Rule.MODE_TARGET }
-    assertTrue(needsInactiveSaveWarning(target, 0L))
+    val future = AtkItem.newAlarm(0, 0).apply {
+      rule.mode = Rule.MODE_ONCE
+      rule.sy = 2026; rule.sm = 11; rule.sd = 25
+    }
+    assertFalse(needsInactiveSaveWarning(future, 1L, now))
+
+    val target = AtkItem.newAlarm(0, 0).apply {
+      rule.mode = Rule.MODE_TARGET
+      rule.ey = 2026; rule.em = 11; rule.ed = 11
+    }
+    assertTrue(needsInactiveSaveWarning(target, 1L, now))
+
+    val countdown = AtkItem.newAlarm(0, 0).apply {
+      rule.mode = Rule.MODE_TARGET
+      rule.hourCycle = 1
+      rule.ey = 2020; rule.em = 1; rule.ed = 1
+    }
+    assertFalse(needsInactiveSaveWarning(countdown, 1L, now))
 
     val days = AtkItem.newAlarm(0, 0).apply { rule.mode = Rule.MODE_DAYS }
-    assertFalse(needsInactiveSaveWarning(days, 0L))
+    assertFalse(needsInactiveSaveWarning(days, 0L, now))
   }
 }
