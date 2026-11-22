@@ -130,4 +130,16 @@ public final class Lunar {
         if (d < 20) return "十" + n1[d - 10];
         return "廿" + n1[d - 20];
     }
+
+    /**
+     * 完整中文日期名（初一…初十、十一…十九、二十、廿一…廿九、三十）。
+     * dayName() 只返回数字部分，列表等场景必须带「初」前缀才符合中文习惯。
+     * 与 AtkOptions.LUNAR_DAYS 的文案保持一致；31 表示原版的「最后一天」选项。
+     */
+    public static String dayLabel(int d) {
+        if (d == 31) return "最后一天";
+        if (d >= 1 && d <= 10) return "初" + dayName(d);
+        if (d >= 11 && d <= 30) return dayName(d);
+        return String.valueOf(d);
+    }
 }

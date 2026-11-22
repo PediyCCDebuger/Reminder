@@ -186,4 +186,58 @@ class AtkModelTest {
     val days = AtkItem.newAlarm(0, 0).apply { rule.mode = Rule.MODE_DAYS }
     assertFalse(needsInactiveSaveWarning(days, 0L, now))
   }
+
+  @Test
+  fun yearMonthSummaryShowsConcreteDayInsteadOfOnlyMonth() {
+    val item = AtkItem.newAlarm(0, 0).apply {
+      rule.mode = Rule.MODE_YEAR_MONTH
+      rule.months = "7"      // 0-based：8 月
+      rule.monthDays = "7"   // 0-based：8 日
+    }
+    assertEquals("[按月] 8月8日", item.summary())
+
+    // 多个日期也要全部显示，不能退化成只有月份。
+    item.rule.monthDays = "7,14"
+    assertEquals("[按月] 8月8日,15日", item.summary())
+
+    // 月末选项（索引 30/31）在原版里会落到当月最后一天。
+    item.rule.monthDays = "30"
+    assertEquals("[按月] 8月月末", item.summary())
+
+    // 指周计算：月份 + 第几个 + 周几。
+    item.rule.byWeek = 1
+    item.rule.nthWeek = "1"
+    item.rule.nthWeekday = "1"
+    assertEquals("[按月] 8月第2个周一", item.summary())
+  }
+
+  @Test
+  fun lunarSummaryUsesFullChineseDayName() {
+    val item = AtkItem.newAlarm(0, 0).apply {
+      rule.mode = Rule.MODE_LUNAR
+      rule.lunarMonth = 1
+      rule.lunarDay = 1
+    }
+    assertEquals("[阴历] 正月初一", item.summary())
+
+    item.rule.lunarDay = 10
+    assertEquals("[阴历] 正月初十", item.summary())
+    item.rule.lunarDay = 15
+    assertEquals("[阴历] 正月十五", item.summary())
+    item.rule.lunarDay = 21
+    assertEquals("[阴历] 正月廿一", item.summary())
+
+    item.rule.lunarMonth = 8
+    item.rule.lunarDay = 8
+    item.rule.lunarLeap = 1
+    assertEquals("[阴历] 闰八月初八", item.summary())
+  }
+
+  @Test
+  fun lunarDayLabelMatchesEditorOptions() {
+    for (d in 1..30) {
+      assertEquals(AtkOptions.LUNAR_DAYS[d - 1], cn.nnci.addintimer.Lunar.dayLabel(d))
+    }
+    assertEquals("最后一天", cn.nnci.addintimer.Lunar.dayLabel(31))
+  }
 }

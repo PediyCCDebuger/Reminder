@@ -982,15 +982,8 @@ private fun AlarmFace(
   val solar = LocalDate.now()
   val lunar = try { Lunar.fromSolar(solar) } catch (e: Exception) { null }
   val lunarText = if (lunar != null) {
-    val d = lunar[2]
-    val day = when {
-      d <= 10 -> "初" + lunarDay(d)
-      d == 20 -> "二十"
-      d == 30 -> "三十"
-      d < 20 -> "十" + lunarDay(d - 10)
-      else -> "廿" + lunarDay(d - 20)
-    }
-    "阴历" + (if (lunar[3] == 1) "闰" else "") + Lunar.monthName(lunar[1]) + day
+    "阴历" + (if (lunar[3] == 1) "闰" else "") +
+      Lunar.monthName(lunar[1]) + Lunar.dayLabel(lunar[2])
   } else {
     ""
   }
@@ -1333,9 +1326,4 @@ private fun FaceGlyph(symbol: String) {
   ) {
     Text(symbol, color = AtkSkin.green, fontSize = 20.sp)
   }
-}
-
-private fun lunarDay(d: Int): String {
-  val n = arrayOf("", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十")
-  return n.getOrElse(d) { d.toString() }
 }

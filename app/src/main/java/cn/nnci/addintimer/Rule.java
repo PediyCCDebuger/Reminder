@@ -175,7 +175,7 @@ public class Rule {
             }
             case MODE_LUNAR:
                 return "按阴历循环：每年 " + (lunarLeap == 1 ? "闰" : "")
-                        + Lunar.monthName(lunarMonth) + Lunar.dayName(lunarDay);
+                        + Lunar.monthName(lunarMonth) + Lunar.dayLabel(lunarDay);
             case MODE_TARGET:
                 return String.format(Locale.CHINA, "目标日期：%04d-%02d-%02d（一次性）", ey, em, ed);
             default:

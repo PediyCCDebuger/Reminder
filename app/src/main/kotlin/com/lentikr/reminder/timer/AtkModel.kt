@@ -273,12 +273,26 @@ class AtkItem {
       )
       Rule.MODE_DAYS -> "[按天] " + if (r.interval <= 1) "每天" else "每 ${r.interval} 天"
       Rule.MODE_YEAR_MONTH -> {
-        val months = parseIndexList(r.months).sorted().joinToString(",") { "${it + 1}月" }
-        "[按月] " + months.ifEmpty { "未选择" }
+        // 3.7.8：原版列表会把具体日期一起显示出来。只显示月份时，像「8月8日」这种
+        // 每年只有一天的生日任务看不出是哪一天，必须把 monthDays / 指周规则也拼上。
+        val months = parseIndexList(r.months).sorted()
+        val monthText = months.joinToString(",") { "${it + 1}月" }.ifEmpty { "未选择" }
+        val detail = if (r.byWeek == 1) {
+          val weeks = parseIndexList(r.nthWeek).sorted()
+          val weekdays = parseIndexList(r.nthWeekday).sorted()
+          val nthText = weeks.joinToString(",") { if (it == 4) "最后" else "第${it + 1}个" }
+          val weekdayText = weekdays.joinToString(",") { "周" + AtkOptions.WEEK_SHORT[it.coerceIn(0, 6)] }
+          if (weeks.isEmpty() || weekdays.isEmpty()) "" else "$nthText$weekdayText"
+        } else {
+          parseIndexList(r.monthDays).sorted().joinToString(",") { d ->
+            if (d == 30 || d == 31) "月末" else "${d + 1}日"
+          }
+        }
+        "[按月] " + monthText + detail
       }
       Rule.MODE_LUNAR -> "[阴历] " +
         (if (r.lunarLeap == 1) "闰" else "") +
-        Lunar.monthName(r.lunarMonth) + Lunar.dayName(r.lunarDay)
+        Lunar.monthName(r.lunarMonth) + Lunar.dayLabel(r.lunarDay)
       Rule.MODE_TARGET -> "[倒计] " + String.format(
         Locale.CHINA, "%04d-%02d-%02d", r.ey, r.em, r.ed,
       )
